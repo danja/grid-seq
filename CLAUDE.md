@@ -100,6 +100,43 @@ lv2_atom_forge_atom(&forge, 3, uris->midi_MidiEvent);
 lv2_atom_forge_write(&forge, midi_data, 3);
 ```
 
+### Plugin/UI State Synchronization
+
+**Pattern: Control Port Arrays**
+For syncing large state (like grid patterns), use bit-packed control ports rather than complex atom objects:
+
+```c
+// Plugin side - pack state into ports
+for (int x = 0; x < GRID_SIZE; x++) {
+    uint8_t row_value = 0;
+    for (int y = 0; y < GRID_SIZE; y++) {
+        if (grid[x][y]) {
+            row_value |= (1 << y);  // Pack 8 bools into 8 bits
+        }
+    }
+    *grid_row_port[x] = (float)row_value;  // Write to control port
+}
+
+// UI side - subscribe to ports and unpack
+ui->port_subscribe->subscribe(handle, port_index, 0, NULL);
+
+// In port_event callback:
+if (port_index >= GRID_ROW_START && port_index <= GRID_ROW_END) {
+    int x = port_index - GRID_ROW_START;
+    uint8_t row_value = (uint8_t)(*(const float*)buffer);
+    for (int y = 0; y < GRID_SIZE; y++) {
+        ui->grid[x][y] = (row_value & (1 << y)) != 0;
+    }
+}
+```
+
+**Rationale:**
+- Control ports are simple, well-supported, atomic
+- Bit packing efficient for boolean grids (8 bools → 1 float)
+- Avoids complexity of LV2 Atom Objects
+- No URID mapping issues
+- Reliable host delivery via port subscription
+
 ## Launchpad Protocol
 
 ### Mode Selection
@@ -184,6 +221,41 @@ void test_grid_toggle(void) {
 - Check pattern persistence across plugin reload
 
 ## Common Patterns
+
+### Note Timing with Fixed Gate Length
+
+**Pattern: Separate Note On and Note Off scheduling**
+
+For precise gate lengths (e.g., 50% of step duration), separate Note On/Off logic:
+
+```c
+// In run() - before advancing
+uint64_t old_step_frame = frame_counter % frames_per_step;
+bool was_before_half = old_step_frame < (frames_per_step / 2);
+
+// Process step boundary (Note On)
+if (sequencer_advance(&state, n_samples)) {
+    sequencer_process_step(&state, &forge, &uris, 0);
+}
+
+// Check for 50% crossing (Note Off)
+uint64_t new_step_frame = frame_counter % frames_per_step;
+bool is_after_half = new_step_frame >= (frames_per_step / 2);
+
+if (was_before_half && is_after_half) {
+    // Calculate exact frame offset to 50% point
+    uint64_t half_point = (frame_counter / frames_per_step) * frames_per_step
+                         + (frames_per_step / 2);
+    uint32_t offset = (uint32_t)(half_point - old_frame);
+    sequencer_process_note_offs(&state, &forge, &uris, offset);
+}
+```
+
+**Benefits:**
+- Frame-accurate gate timing
+- Works across any buffer size
+- Clean separation of Note On/Off events
+- No stuck notes from missed boundaries
 
 ### Error Handling
 ```c

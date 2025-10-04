@@ -297,37 +297,34 @@ static void port_event(
     GridSeqUI* ui = (GridSeqUI*)handle;
 
     // Handle atom messages (notify port)
-    if (port_index == 7 && format == ui->atom_eventTransfer) {
-        const LV2_Atom_Sequence* seq = (const LV2_Atom_Sequence*)buffer;
+    if (port_index == 7) {
+        fprintf(stderr, "GUI: port_event called for port 7, format=%u, eventTransfer=%u\n",
+                format, ui->atom_eventTransfer);
 
-        LV2_ATOM_SEQUENCE_FOREACH(seq, ev) {
-            const LV2_Atom_Object* obj = (const LV2_Atom_Object*)&ev->body;
+        if (format == ui->atom_eventTransfer) {
+            const LV2_Atom_Sequence* seq = (const LV2_Atom_Sequence*)buffer;
+            fprintf(stderr, "GUI: Received atom sequence, size=%u\n", seq->atom.size);
 
-            if (obj->body.otype == ui->gridState) {
-                // Extract cell coordinates and value
-                const LV2_Atom* x_atom = NULL;
-                const LV2_Atom* y_atom = NULL;
-                const LV2_Atom* val_atom = NULL;
+            LV2_ATOM_SEQUENCE_FOREACH(seq, ev) {
+                fprintf(stderr, "GUI: Event body.type=%u (gridState=%u) size=%u\n",
+                        ev->body.type, ui->gridState, ev->body.size);
 
-                lv2_atom_object_get(obj,
-                    ui->cellX, &x_atom,
-                    ui->cellY, &y_atom,
-                    ui->cellValue, &val_atom,
-                    0);
+                // Check if it's our gridState atom (full grid data)
+                if (ev->body.type == ui->gridState && ev->body.size == 64) {
+                    const uint8_t* grid_data = (const uint8_t*)(&ev->body + 1);
 
-                if (x_atom && y_atom && val_atom &&
-                    x_atom->type == ui->atom_Int &&
-                    y_atom->type == ui->atom_Int &&
-                    val_atom->type == ui->atom_Int) {
+                    fprintf(stderr, "GUI: Received full grid state (%u bytes)\n", ev->body.size);
 
-                    int x = ((const LV2_Atom_Int*)x_atom)->body;
-                    int y = ((const LV2_Atom_Int*)y_atom)->body;
-                    int value = ((const LV2_Atom_Int*)val_atom)->body;
-
-                    if (x >= 0 && x < GRID_SIZE && y >= 0 && y < GRID_SIZE) {
-                        ui->state.grid[x][y] = (value != 0);
-                        draw_grid(ui);
+                    // Copy grid data
+                    for (int x = 0; x < 8; x++) {
+                        for (int y = 0; y < 8; y++) {
+                            ui->state.grid[x][y] = (grid_data[x * 8 + y] != 0);
+                        }
                     }
+
+                    // Redraw
+                    draw_grid(ui);
+                    fprintf(stderr, "GUI: Grid updated and redrawn\n");
                 }
             }
         }
@@ -409,10 +406,14 @@ static int idle(LV2UI_Handle handle) {
                     draw_grid(ui);
 
                     // Send to plugin via control ports (plugin handles Launchpad LEDs)
+                    // The plugin will echo this back, but we've already updated locally
                     float fx = (float)x;
                     float fy = (float)grid_y;
                     ui->write_function(ui->controller, 3, sizeof(float), 0, &fx);
                     ui->write_function(ui->controller, 4, sizeof(float), 0, &fy);
+
+                    // Also listen for changes from the plugin (Launchpad button presses)
+                    // by monitoring grid_changed counter and re-syncing periodically
                 }
                 break;
             }

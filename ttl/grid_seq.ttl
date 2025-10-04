@@ -86,6 +86,78 @@
         lv2:symbol "notify" ;
         lv2:name "UI Notifications" ;
         lv2:designation lv2:control
+    ] , [
+        a lv2:OutputPort ,
+            lv2:ControlPort ;
+        lv2:index 8 ;
+        lv2:symbol "grid_row_0" ;
+        lv2:name "Grid Row 0" ;
+        lv2:default 0 ;
+        lv2:minimum 0 ;
+        lv2:maximum 255
+    ] , [
+        a lv2:OutputPort ,
+            lv2:ControlPort ;
+        lv2:index 9 ;
+        lv2:symbol "grid_row_1" ;
+        lv2:name "Grid Row 1" ;
+        lv2:default 0 ;
+        lv2:minimum 0 ;
+        lv2:maximum 255
+    ] , [
+        a lv2:OutputPort ,
+            lv2:ControlPort ;
+        lv2:index 10 ;
+        lv2:symbol "grid_row_2" ;
+        lv2:name "Grid Row 2" ;
+        lv2:default 0 ;
+        lv2:minimum 0 ;
+        lv2:maximum 255
+    ] , [
+        a lv2:OutputPort ,
+            lv2:ControlPort ;
+        lv2:index 11 ;
+        lv2:symbol "grid_row_3" ;
+        lv2:name "Grid Row 3" ;
+        lv2:default 0 ;
+        lv2:minimum 0 ;
+        lv2:maximum 255
+    ] , [
+        a lv2:OutputPort ,
+            lv2:ControlPort ;
+        lv2:index 12 ;
+        lv2:symbol "grid_row_4" ;
+        lv2:name "Grid Row 4" ;
+        lv2:default 0 ;
+        lv2:minimum 0 ;
+        lv2:maximum 255
+    ] , [
+        a lv2:OutputPort ,
+            lv2:ControlPort ;
+        lv2:index 13 ;
+        lv2:symbol "grid_row_5" ;
+        lv2:name "Grid Row 5" ;
+        lv2:default 0 ;
+        lv2:minimum 0 ;
+        lv2:maximum 255
+    ] , [
+        a lv2:OutputPort ,
+            lv2:ControlPort ;
+        lv2:index 14 ;
+        lv2:symbol "grid_row_6" ;
+        lv2:name "Grid Row 6" ;
+        lv2:default 0 ;
+        lv2:minimum 0 ;
+        lv2:maximum 255
+    ] , [
+        a lv2:OutputPort ,
+            lv2:ControlPort ;
+        lv2:index 15 ;
+        lv2:symbol "grid_row_7" ;
+        lv2:name "Grid Row 7" ;
+        lv2:default 0 ;
+        lv2:minimum 0 ;
+        lv2:maximum 255
     ] .
 
 <http://github.com/danny/grid-seq#ui>

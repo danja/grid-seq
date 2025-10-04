@@ -219,17 +219,51 @@ static void send_launchpad_led(GridSeq* gs, LV2_Atom_Forge* forge, uint8_t note,
 }
 
 static void send_grid_state_update(GridSeq* gs, LV2_Atom_Forge* forge, uint8_t x, uint8_t y, bool value) {
-    LV2_Atom_Forge_Frame frame;
+    // Manually construct the object to avoid forge frame issues
+    // Structure: Event header + Object header + 3 properties (each: key URID + Int atom)
 
-    lv2_atom_forge_frame_time(forge, 0);
-    lv2_atom_forge_object(forge, &frame, 0, gs->gridState);
-    lv2_atom_forge_key(forge, gs->cellX);
-    lv2_atom_forge_int(forge, x);
-    lv2_atom_forge_key(forge, gs->cellY);
-    lv2_atom_forge_int(forge, y);
-    lv2_atom_forge_key(forge, gs->cellValue);
-    lv2_atom_forge_int(forge, value ? 1 : 0);
-    lv2_atom_forge_pop(forge, &frame);
+    // Calculate sizes
+    const uint32_t int_size = sizeof(LV2_Atom_Int);
+    const uint32_t prop_size = sizeof(LV2_Atom_Property_Body) + int_size;
+    const uint32_t obj_body_size = 3 * prop_size;  // 3 properties
+    const uint32_t obj_size = sizeof(LV2_Atom_Object_Body) + obj_body_size;
+
+    // Write event timestamp
+    lv2_atom_forge_beat_time(forge, 0.0);
+
+    // Write object header manually
+    LV2_Atom_Object obj_header = {
+        {obj_size, forge->Object},
+        {0, gs->gridState}
+    };
+    lv2_atom_forge_raw(forge, &obj_header, sizeof(obj_header));
+    lv2_atom_forge_pad(forge, sizeof(obj_header));
+
+    // Write property 1: cellX = x
+    LV2_Atom_Property_Body prop1 = {gs->cellX, 0, {int_size, gs->map->map(gs->map->handle, LV2_ATOM__Int)}};
+    lv2_atom_forge_raw(forge, &prop1, sizeof(prop1));
+    lv2_atom_forge_pad(forge, sizeof(prop1));
+    int32_t x_val = x;
+    lv2_atom_forge_raw(forge, &x_val, sizeof(x_val));
+    lv2_atom_forge_pad(forge, sizeof(x_val));
+
+    // Write property 2: cellY = y
+    LV2_Atom_Property_Body prop2 = {gs->cellY, 0, {int_size, gs->atom_Int}};
+    lv2_atom_forge_raw(forge, &prop2, sizeof(prop2));
+    lv2_atom_forge_pad(forge, sizeof(prop2));
+    int32_t y_val = y;
+    lv2_atom_forge_raw(forge, &y_val, sizeof(y_val));
+    lv2_atom_forge_pad(forge, sizeof(y_val));
+
+    // Write property 3: cellValue = value
+    LV2_Atom_Property_Body prop3 = {gs->cellValue, 0, {int_size, gs->atom_Int}};
+    lv2_atom_forge_raw(forge, &prop3, sizeof(prop3));
+    lv2_atom_forge_pad(forge, sizeof(prop3));
+    int32_t val = value ? 1 : 0;
+    lv2_atom_forge_raw(forge, &val, sizeof(val));
+    lv2_atom_forge_pad(forge, sizeof(val));
+
+    fprintf(stderr, "grid-seq: Manually wrote object for x=%d y=%d val=%d\n", x, y, value);
 }
 
 static void update_launchpad_leds(GridSeq* gs, LV2_Atom_Forge* forge) {
@@ -360,6 +394,8 @@ static void run(LV2_Handle instance, uint32_t n_samples) {
     lv2_atom_forge_set_buffer(&gs->notify_forge,
                               (uint8_t*)gs->notify,
                               notify_capacity);
+    fprintf(stderr, "grid-seq: notify forge buf=%p capacity=%u offset=%u\n",
+            (void*)gs->notify_forge.buf, notify_capacity, gs->notify_forge.offset);
 
     // Update output ports BEFORE processing
     if (gs->current_step) {
@@ -377,7 +413,7 @@ static void run(LV2_Handle instance, uint32_t n_samples) {
     LV2_Atom_Forge_Frame lp_frame;
     lv2_atom_forge_sequence_head(&gs->launchpad_forge, &lp_frame, 0);
 
-    // Start UI notification sequence
+    // Start UI notification sequence (use frame time like MIDI and Launchpad)
     LV2_Atom_Forge_Frame notify_frame;
     lv2_atom_forge_sequence_head(&gs->notify_forge, &notify_frame, 0);
 
@@ -409,10 +445,29 @@ static void run(LV2_Handle instance, uint32_t n_samples) {
         gs->prev_led_step = gs->state.current_step;
     }
 
-    // Send grid state update to UI if a cell was toggled
+    // Send full grid state to UI if anything changed
     if (gs->last_toggled_x >= 0 && gs->last_toggled_y >= 0) {
-        bool value = gs->state.grid[gs->last_toggled_x][gs->last_toggled_y];
-        send_grid_state_update(gs, &gs->notify_forge, gs->last_toggled_x, gs->last_toggled_y, value);
+        // Prepare grid data
+        uint8_t grid_data[64];
+        for (int x = 0; x < 8; x++) {
+            for (int y = 0; y < 8; y++) {
+                grid_data[x * 8 + y] = gs->state.grid[x][y] ? 1 : 0;
+            }
+        }
+
+        // Write using frame_time (frames, not beats) to match working MIDI pattern
+        fprintf(stderr, "grid-seq: About to write grid, gridState URID=%u\n", gs->gridState);
+
+        LV2_Atom_Forge_Ref ref1 = lv2_atom_forge_frame_time(&gs->notify_forge, 0);
+        fprintf(stderr, "grid-seq: frame_time returned %lu\n", (unsigned long)ref1);
+
+        LV2_Atom_Forge_Ref ref2 = lv2_atom_forge_atom(&gs->notify_forge, 64, gs->gridState);
+        fprintf(stderr, "grid-seq: forge_atom returned %lu\n", (unsigned long)ref2);
+
+        LV2_Atom_Forge_Ref ref3 = lv2_atom_forge_write(&gs->notify_forge, grid_data, 64);
+        fprintf(stderr, "grid-seq: forge_write returned %lu\n", (unsigned long)ref3);
+
+        fprintf(stderr, "grid-seq: Sent full grid state to UI\n");
         gs->last_toggled_x = -1;
         gs->last_toggled_y = -1;
     }

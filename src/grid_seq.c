@@ -13,6 +13,7 @@
 #include "grid_seq/common.h"
 #include "state.h"
 #include "sequencer.h"
+#include "launchpad.h"
 
 #include <lv2/core/lv2.h>
 #include <lv2/atom/atom.h>
@@ -58,6 +59,11 @@ typedef struct {
     // Previous grid control values
     float prev_grid_x;
     float prev_grid_y;
+
+    // Launchpad state
+    bool launchpad_mode_entered;
+    uint8_t prev_led_step;
+    bool grid_dirty;
 } GridSeq;
 
 static LV2_Handle instantiate(
@@ -109,6 +115,11 @@ static LV2_Handle instantiate(
     gs->prev_grid_x = -1.0f;
     gs->prev_grid_y = -1.0f;
 
+    // Initialize Launchpad state
+    gs->launchpad_mode_entered = false;
+    gs->prev_led_step = 0;
+    gs->grid_dirty = true;
+
     return (LV2_Handle)gs;
 }
 
@@ -138,6 +149,40 @@ static void connect_port(
     }
 }
 
+static void send_sysex_programmer_mode(GridSeq* gs, LV2_Atom_Forge* forge, bool enter) {
+    // SysEx: F0 00 20 29 02 0D 0E [01/00] F7
+    uint8_t sysex[] = {0xF0, 0x00, 0x20, 0x29, 0x02, 0x0D, 0x0E, enter ? 0x01 : 0x00, 0xF7};
+
+    lv2_atom_forge_frame_time(forge, 0);
+    lv2_atom_forge_atom(forge, sizeof(sysex), gs->midi_MidiEvent);
+    lv2_atom_forge_write(forge, sysex, sizeof(sysex));
+}
+
+static void send_launchpad_led(GridSeq* gs, LV2_Atom_Forge* forge, uint8_t note, uint8_t color) {
+    uint8_t msg[3] = {0x90, note, color};
+
+    lv2_atom_forge_frame_time(forge, 0);
+    lv2_atom_forge_atom(forge, 3, gs->midi_MidiEvent);
+    lv2_atom_forge_write(forge, msg, 3);
+}
+
+static void update_launchpad_leds(GridSeq* gs, LV2_Atom_Forge* forge) {
+    for (uint8_t x = 0; x < GRID_SIZE; x++) {
+        for (uint8_t y = 0; y < GRID_SIZE; y++) {
+            uint8_t note = lp_grid_to_note(x, y);
+            uint8_t color;
+
+            if (x == gs->state.current_step) {
+                color = gs->state.grid[x][y] ? LP_COLOR_YELLOW : LP_COLOR_GREEN_DIM;
+            } else {
+                color = gs->state.grid[x][y] ? LP_COLOR_GREEN : LP_COLOR_OFF;
+            }
+
+            send_launchpad_led(gs, forge, note, color);
+        }
+    }
+}
+
 static void activate(LV2_Handle instance) {
     GridSeq* gs = (GridSeq*)instance;
     gs->state.playing = true;
@@ -145,10 +190,34 @@ static void activate(LV2_Handle instance) {
     gs->state.current_step = 0;
     gs->state.previous_step = GRID_SIZE - 1;  // Set to last step so first step triggers
     gs->state.first_run = true;
+    gs->grid_dirty = true;  // Force LED update on first run
 }
 
 static void run(LV2_Handle instance, uint32_t n_samples) {
     GridSeq* gs = (GridSeq*)instance;
+
+    // Process incoming MIDI (Launchpad button presses)
+    LV2_ATOM_SEQUENCE_FOREACH(gs->midi_in, ev) {
+        if (ev->body.type == gs->midi_MidiEvent) {
+            const uint8_t* msg = (const uint8_t*)(ev + 1);
+
+            // Note On (0x90)
+            if ((msg[0] & 0xF0) == 0x90 && msg[2] > 0) {
+                uint8_t note = msg[1];
+
+                // Check if it's a grid button
+                if (note >= 11 && note <= 88) {
+                    uint8_t x, y;
+                    lp_note_to_grid(note, &x, &y);
+
+                    if (x < GRID_SIZE && y < GRID_SIZE) {
+                        state_toggle_step(&gs->state, x, y);
+                        gs->grid_dirty = true;
+                    }
+                }
+            }
+        }
+    }
 
     // Check for grid toggle from UI
     if (gs->grid_x && gs->grid_y) {
@@ -161,6 +230,7 @@ static void run(LV2_Handle instance, uint32_t n_samples) {
             state_toggle_step(&gs->state, (uint8_t)x, (uint8_t)y);
             gs->prev_grid_x = x;
             gs->prev_grid_y = y;
+            gs->grid_dirty = true;
         }
     }
 
@@ -179,6 +249,13 @@ static void run(LV2_Handle instance, uint32_t n_samples) {
     LV2_Atom_Forge_Frame frame;
     lv2_atom_forge_sequence_head(&gs->forge, &frame, 0);
 
+    // Enter Programmer Mode on first run
+    if (!gs->launchpad_mode_entered) {
+        send_sysex_programmer_mode(gs, &gs->forge, true);
+        gs->launchpad_mode_entered = true;
+        gs->grid_dirty = true;
+    }
+
     // Always trigger first step on first run
     if (gs->state.first_run) {
         sequencer_process_step(&gs->state, &gs->forge, &gs->seq_uris, 0);
@@ -187,6 +264,14 @@ static void run(LV2_Handle instance, uint32_t n_samples) {
     // Check if we crossed a step boundary
     else if (sequencer_advance(&gs->state, n_samples)) {
         sequencer_process_step(&gs->state, &gs->forge, &gs->seq_uris, 0);
+        gs->grid_dirty = true;  // Update LEDs when step changes
+    }
+
+    // Update Launchpad LEDs if grid changed or step changed
+    if (gs->grid_dirty || gs->state.current_step != gs->prev_led_step) {
+        update_launchpad_leds(gs, &gs->forge);
+        gs->grid_dirty = false;
+        gs->prev_led_step = gs->state.current_step;
     }
 
     // End sequence

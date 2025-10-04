@@ -16,12 +16,14 @@ plugin_sources = [
   'src/grid_seq.c',
   'src/sequencer.c',
   'src/state.c',
+  'src/launchpad.c',
 ]
 
 # UI sources
 ui_sources = [
   'src/gui.c',
   'src/state.c',
+  'src/launchpad.c',
 ]
 
 # Build plugin shared library

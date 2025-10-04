@@ -56,6 +56,7 @@ typedef struct {
 
     LaunchpadController* launchpad;
     uint8_t prev_step;
+    float prev_grid_changed;
 } GridSeqUI;
 
 static void draw_grid(GridSeqUI* ui) {
@@ -158,6 +159,12 @@ static LV2UI_Handle instantiate(
     ui->wm_delete_window = XInternAtom(ui->display, "WM_DELETE_WINDOW", False);
     XSetWMProtocols(ui->display, ui->window, &ui->wm_delete_window, 1);
 
+    // Set window to not accept keyboard focus (prevents blocking DAW shortcuts)
+    XWMHints hints;
+    hints.flags = InputHint;
+    hints.input = False;
+    XSetWMHints(ui->display, ui->window, &hints);
+
     XSelectInput(ui->display, ui->window,
                  ExposureMask | ButtonPressMask | StructureNotifyMask);
 
@@ -191,14 +198,12 @@ static LV2UI_Handle instantiate(
     draw_grid(ui);
     XFlush(ui->display);
 
-    // Try to connect to Launchpad (card 6 based on earlier detection)
-    ui->launchpad = launchpad_init(6);
-    if (ui->launchpad) {
-        launchpad_enter_programmer_mode(ui->launchpad);
-        launchpad_update_grid(ui->launchpad, &ui->state);
-    }
+    // Don't initialize Launchpad here - it's handled by the plugin via MIDI routing
+    // This prevents conflicts and ghost LED events
+    ui->launchpad = NULL;
 
     ui->prev_step = 0;
+    ui->prev_grid_changed = 0.0f;
 
     // Return the X11 window as the widget
     *widget = (LV2UI_Widget)(unsigned long)ui->window;
@@ -235,7 +240,7 @@ static void port_event(
     (void)format;
 
     // Handle current step updates from plugin
-    if (port_index == 4 && buffer) {  // PORT_CURRENT_STEP
+    if (port_index == 5 && buffer) {  // PORT_CURRENT_STEP
         float step = *(const float*)buffer;
         if (step >= 0 && step < GRID_SIZE) {
             ui->state.current_step = (uint8_t)step;
@@ -245,6 +250,19 @@ static void port_event(
                 launchpad_update_grid(ui->launchpad, &ui->state);
                 ui->prev_step = ui->state.current_step;
             }
+        }
+    }
+
+    // Handle grid changed counter from plugin
+    if (port_index == 6 && buffer) {  // PORT_GRID_CHANGED
+        float grid_changed = *(const float*)buffer;
+
+        // Note: Currently the GUI maintains its own grid state which can get out of sync
+        // if the Launchpad hardware changes the pattern (since that goes through the plugin).
+        // The counter tells us something changed, but not what.
+        // TODO: Implement proper state sync using LV2 State extension or Atom messages
+        if (grid_changed != ui->prev_grid_changed) {
+            ui->prev_grid_changed = grid_changed;
         }
     }
 }
@@ -294,16 +312,11 @@ static int idle(LV2UI_Handle handle) {
                     state_toggle_step(&ui->state, x, grid_y);
                     draw_grid(ui);
 
-                    // Update Launchpad LEDs
-                    if (ui->launchpad) {
-                        launchpad_update_grid(ui->launchpad, &ui->state);
-                    }
-
-                    // Send to plugin via control ports
+                    // Send to plugin via control ports (plugin handles Launchpad LEDs)
                     float fx = (float)x;
                     float fy = (float)grid_y;
-                    ui->write_function(ui->controller, 2, sizeof(float), 0, &fx);
-                    ui->write_function(ui->controller, 3, sizeof(float), 0, &fy);
+                    ui->write_function(ui->controller, 3, sizeof(float), 0, &fx);
+                    ui->write_function(ui->controller, 4, sizeof(float), 0, &fy);
                 }
                 break;
             }
@@ -311,17 +324,17 @@ static int idle(LV2UI_Handle handle) {
     }
 
     // Poll Launchpad for button presses
+    // Note: Currently disabled because Launchpad is routed through plugin MIDI input
+    // The plugin receives button presses and updates its state, but GUI needs sync
+    // This will be handled via the grid_changed port mechanism
+    /*
     if (ui->launchpad) {
         if (launchpad_poll_input(ui->launchpad, &ui->state)) {
-            // Grid was changed by Launchpad, update GUI and plugin
             draw_grid(ui);
             launchpad_update_grid(ui->launchpad, &ui->state);
-
-            // Send changes to plugin (last toggled cell)
-            // Note: This is simplified - ideally we'd track which cell changed
-            // For now, the Launchpad update will be reflected visually
         }
     }
+    */
 
     // Redraw periodically to update current step indicator
     if (++ui->idle_counter > 5) {

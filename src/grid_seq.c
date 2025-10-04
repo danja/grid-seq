@@ -21,25 +21,31 @@
 #include <lv2/atom/util.h>
 #include <lv2/urid/urid.h>
 #include <lv2/midi/midi.h>
+#include <lv2/time/time.h>
 
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
 
 typedef enum {
     PORT_MIDI_IN = 0,
     PORT_MIDI_OUT = 1,
-    PORT_GRID_X = 2,
-    PORT_GRID_Y = 3,
-    PORT_CURRENT_STEP = 4
+    PORT_LAUNCHPAD_OUT = 2,
+    PORT_GRID_X = 3,
+    PORT_GRID_Y = 4,
+    PORT_CURRENT_STEP = 5,
+    PORT_GRID_CHANGED = 6
 } PortIndex;
 
 typedef struct {
     // Ports
     const LV2_Atom_Sequence* midi_in;
     LV2_Atom_Sequence* midi_out;
+    LV2_Atom_Sequence* launchpad_out;
     const float* grid_x;
     const float* grid_y;
     float* current_step;
+    float* grid_changed;
 
     // Features
     LV2_URID_Map* map;
@@ -48,6 +54,9 @@ typedef struct {
     LV2_URID midi_MidiEvent;
     LV2_URID atom_Blank;
     LV2_URID atom_Object;
+    LV2_URID time_Position;
+    LV2_URID time_beatsPerMinute;
+    LV2_URID time_speed;
 
     // State
     GridSeqState state;
@@ -64,6 +73,12 @@ typedef struct {
     bool launchpad_mode_entered;
     uint8_t prev_led_step;
     bool grid_dirty;
+
+    // Separate forge for Launchpad
+    LV2_Atom_Forge launchpad_forge;
+
+    // Grid change counter
+    uint32_t grid_change_counter;
 } GridSeq;
 
 static LV2_Handle instantiate(
@@ -94,14 +109,18 @@ static LV2_Handle instantiate(
     gs->midi_MidiEvent = gs->map->map(gs->map->handle, LV2_MIDI__MidiEvent);
     gs->atom_Blank = gs->map->map(gs->map->handle, LV2_ATOM__Blank);
     gs->atom_Object = gs->map->map(gs->map->handle, LV2_ATOM__Object);
+    gs->time_Position = gs->map->map(gs->map->handle, LV2_TIME__Position);
+    gs->time_beatsPerMinute = gs->map->map(gs->map->handle, LV2_TIME__beatsPerMinute);
+    gs->time_speed = gs->map->map(gs->map->handle, LV2_TIME__speed);
 
     gs->seq_uris.midi_MidiEvent = gs->midi_MidiEvent;
 
     // Initialize state
     state_init(&gs->state, rate);
 
-    // Initialize atom forge
+    // Initialize atom forges
     lv2_atom_forge_init(&gs->forge, gs->map);
+    lv2_atom_forge_init(&gs->launchpad_forge, gs->map);
 
     // Set up a simple test pattern - single note per step for easy testing
     state_toggle_step(&gs->state, 0, 0);  // Step 0: C2
@@ -137,6 +156,9 @@ static void connect_port(
         case PORT_MIDI_OUT:
             gs->midi_out = (LV2_Atom_Sequence*)data;
             break;
+        case PORT_LAUNCHPAD_OUT:
+            gs->launchpad_out = (LV2_Atom_Sequence*)data;
+            break;
         case PORT_GRID_X:
             gs->grid_x = (const float*)data;
             break;
@@ -145,6 +167,9 @@ static void connect_port(
             break;
         case PORT_CURRENT_STEP:
             gs->current_step = (float*)data;
+            break;
+        case PORT_GRID_CHANGED:
+            gs->grid_changed = (float*)data;
             break;
     }
 }
@@ -196,8 +221,45 @@ static void activate(LV2_Handle instance) {
 static void run(LV2_Handle instance, uint32_t n_samples) {
     GridSeq* gs = (GridSeq*)instance;
 
-    // Process incoming MIDI (Launchpad button presses)
+    // Process incoming MIDI and Time position
     LV2_ATOM_SEQUENCE_FOREACH(gs->midi_in, ev) {
+        // Check for time position (tempo/BPM)
+        if (ev->body.type == gs->atom_Object || ev->body.type == gs->atom_Blank) {
+            const LV2_Atom_Object* obj = (const LV2_Atom_Object*)&ev->body;
+
+            if (obj->body.otype == gs->time_Position) {
+                // Extract BPM
+                const LV2_Atom* bpm_atom = NULL;
+                const LV2_Atom* speed_atom = NULL;
+
+                lv2_atom_object_get(obj,
+                    gs->time_beatsPerMinute, &bpm_atom,
+                    gs->time_speed, &speed_atom,
+                    0);
+
+                // Update BPM
+                if (bpm_atom && bpm_atom->type == gs->map->map(gs->map->handle, LV2_ATOM__Float)) {
+                    float bpm = ((const LV2_Atom_Float*)bpm_atom)->body;
+                    if (bpm > 0) {
+                        state_update_tempo(&gs->state, bpm);
+                    }
+                }
+
+                // Update transport state (playing/stopped)
+                if (speed_atom && speed_atom->type == gs->map->map(gs->map->handle, LV2_ATOM__Float)) {
+                    float speed = ((const LV2_Atom_Float*)speed_atom)->body;
+                    bool was_playing = gs->state.playing;
+                    gs->state.playing = (speed > 0.0f);
+
+                    if (!was_playing && gs->state.playing) {
+                        // Started playing - reset frame counter
+                        gs->state.frame_counter = 0;
+                        gs->state.current_step = 0;
+                    }
+                }
+            }
+        }
+
         if (ev->body.type == gs->midi_MidiEvent) {
             const uint8_t* msg = (const uint8_t*)(ev + 1);
 
@@ -213,6 +275,7 @@ static void run(LV2_Handle instance, uint32_t n_samples) {
                     if (x < GRID_SIZE && y < GRID_SIZE) {
                         state_toggle_step(&gs->state, x, y);
                         gs->grid_dirty = true;
+                        gs->grid_change_counter++;
                     }
                 }
             }
@@ -231,27 +294,41 @@ static void run(LV2_Handle instance, uint32_t n_samples) {
             gs->prev_grid_x = x;
             gs->prev_grid_y = y;
             gs->grid_dirty = true;
+            gs->grid_change_counter++;
         }
     }
 
-    // Setup forge to write to output
+    // Setup forge for MIDI notes output
     const uint32_t out_capacity = gs->midi_out->atom.size;
     lv2_atom_forge_set_buffer(&gs->forge,
                               (uint8_t*)gs->midi_out,
                               out_capacity);
 
-    // Update current step output port BEFORE processing
+    // Setup forge for Launchpad control output
+    const uint32_t lp_capacity = gs->launchpad_out->atom.size;
+    lv2_atom_forge_set_buffer(&gs->launchpad_forge,
+                              (uint8_t*)gs->launchpad_out,
+                              lp_capacity);
+
+    // Update output ports BEFORE processing
     if (gs->current_step) {
         *gs->current_step = (float)gs->state.current_step;
     }
+    if (gs->grid_changed) {
+        *gs->grid_changed = (float)(gs->grid_change_counter % 1000000);
+    }
 
-    // Start sequence
+    // Start MIDI note sequence
     LV2_Atom_Forge_Frame frame;
     lv2_atom_forge_sequence_head(&gs->forge, &frame, 0);
 
+    // Start Launchpad control sequence
+    LV2_Atom_Forge_Frame lp_frame;
+    lv2_atom_forge_sequence_head(&gs->launchpad_forge, &lp_frame, 0);
+
     // Enter Programmer Mode on first run
     if (!gs->launchpad_mode_entered) {
-        send_sysex_programmer_mode(gs, &gs->forge, true);
+        send_sysex_programmer_mode(gs, &gs->launchpad_forge, true);
         gs->launchpad_mode_entered = true;
         gs->grid_dirty = true;
     }
@@ -267,15 +344,18 @@ static void run(LV2_Handle instance, uint32_t n_samples) {
         gs->grid_dirty = true;  // Update LEDs when step changes
     }
 
+    // End MIDI note sequence
+    lv2_atom_forge_pop(&gs->forge, &frame);
+
     // Update Launchpad LEDs if grid changed or step changed
     if (gs->grid_dirty || gs->state.current_step != gs->prev_led_step) {
-        update_launchpad_leds(gs, &gs->forge);
+        update_launchpad_leds(gs, &gs->launchpad_forge);
         gs->grid_dirty = false;
         gs->prev_led_step = gs->state.current_step;
     }
 
-    // End sequence
-    lv2_atom_forge_pop(&gs->forge, &frame);
+    // End Launchpad control sequence
+    lv2_atom_forge_pop(&gs->launchpad_forge, &lp_frame);
 }
 
 static void deactivate(LV2_Handle instance) {

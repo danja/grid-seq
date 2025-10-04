@@ -50,6 +50,7 @@ typedef struct {
     int cell_size;
     int idle_counter;
     bool mapped;
+    bool first_idle;
     Atom wm_delete_window;
 } GridSeqUI;
 
@@ -156,7 +157,19 @@ static LV2UI_Handle instantiate(
     XSelectInput(ui->display, ui->window,
                  ExposureMask | ButtonPressMask | StructureNotifyMask);
 
-    // Create Cairo surface before mapping
+    // Map the window FIRST
+    XMapWindow(ui->display, ui->window);
+
+    // Wait for window to be viewable
+    XWindowAttributes attrs;
+    int attempts = 0;
+    while (attempts++ < 100) {
+        XGetWindowAttributes(ui->display, ui->window, &attrs);
+        if (attrs.map_state == IsViewable) break;
+        XSync(ui->display, False);
+    }
+
+    // Now create Cairo surface
     ui->surface = cairo_xlib_surface_create(
         ui->display, ui->window,
         DefaultVisual(ui->display, screen),
@@ -167,14 +180,12 @@ static LV2UI_Handle instantiate(
 
     // Initialize state
     ui->idle_counter = 0;
-    ui->mapped = false;
-
-    // Map the window to make it visible
-    XMapWindow(ui->display, ui->window);
-    XFlush(ui->display);
-
-    // Mark as mapped and draw
     ui->mapped = true;
+    ui->first_idle = true;
+
+    // Force initial draw
+    draw_grid(ui);
+    XFlush(ui->display);
 
     // Return the X11 window as the widget
     *widget = (LV2UI_Widget)(unsigned long)ui->window;
@@ -202,17 +213,28 @@ static void port_event(
     uint32_t format,
     const void* buffer
 ) {
-    (void)handle;
-    (void)port_index;
+    GridSeqUI* ui = (GridSeqUI*)handle;
     (void)buffer_size;
     (void)format;
-    (void)buffer;
 
-    // Handle port updates from plugin
+    // Handle current step updates from plugin
+    if (port_index == 4 && buffer) {  // PORT_CURRENT_STEP
+        float step = *(const float*)buffer;
+        if (step >= 0 && step < GRID_SIZE) {
+            ui->state.current_step = (uint8_t)step;
+            // Redraw will happen in idle callback
+        }
+    }
 }
 
 static int idle(LV2UI_Handle handle) {
     GridSeqUI* ui = (GridSeqUI*)handle;
+
+    // Force draw on first idle call
+    if (ui->first_idle) {
+        ui->first_idle = false;
+        draw_grid(ui);
+    }
 
     XEvent event;
     while (XPending(ui->display)) {
@@ -258,9 +280,8 @@ static int idle(LV2UI_Handle handle) {
         }
     }
 
-    // Simulate current step animation (in real version, sync with plugin)
-    if (++ui->idle_counter > 10) {
-        ui->state.current_step = (ui->state.current_step + 1) % GRID_SIZE;
+    // Redraw periodically to update current step indicator
+    if (++ui->idle_counter > 5) {
         draw_grid(ui);
         ui->idle_counter = 0;
     }
@@ -272,6 +293,8 @@ static int show(LV2UI_Handle handle) {
     GridSeqUI* ui = (GridSeqUI*)handle;
 
     // Force initial draw when shown
+    XClearArea(ui->display, ui->window, 0, 0, 0, 0, True);
+    XFlush(ui->display);
     draw_grid(ui);
 
     return 0;

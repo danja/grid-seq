@@ -170,6 +170,11 @@ static void run(LV2_Handle instance, uint32_t n_samples) {
                               (uint8_t*)gs->midi_out,
                               out_capacity);
 
+    // Update current step output port BEFORE processing
+    if (gs->current_step) {
+        *gs->current_step = (float)gs->state.current_step;
+    }
+
     // Start sequence
     LV2_Atom_Forge_Frame frame;
     lv2_atom_forge_sequence_head(&gs->forge, &frame, 0);
@@ -186,11 +191,6 @@ static void run(LV2_Handle instance, uint32_t n_samples) {
 
     // End sequence
     lv2_atom_forge_pop(&gs->forge, &frame);
-
-    // Update current step output port
-    if (gs->current_step) {
-        *gs->current_step = (float)gs->state.current_step;
-    }
 }
 
 static void deactivate(LV2_Handle instance) {

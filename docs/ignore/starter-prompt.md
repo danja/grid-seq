@@ -1,0 +1,6 @@
+grid-seq will be a grid-based midi sequencer built as an lv2 plugin. It will have two user interfaces : one, a GUI that will show when grid-seq is launched in an lv2 host, two an external controller in the form of a Novation Launchpad Mini Mk 3  . The GUI will match the physical hardware in layout and operation. There will be an 8x8 grid of buttons with associated LEDs plus an upper and right-hand line of keys for meta controls. In the first instance there will be a memory-mapped grid of just one set of 8x8 positions corresponding to the midi notes from C2 up in semitones on the vertical axis, time steps of two bars of notes in the horizontal.
+The code will follow lv2 conventions with whatever libraries are considered appropriate.
+The directory structure will  follow conventions, it will be developed in VS Code with the assistance of Claude Code, so a CLAUDE.md should be created to give Claude hints about conventions. 
+The initial target of the plugin will be Reaper as host DAW on an Ubuntu x64 PC. 
+This is only the first iteration, consideration should be made for future extension. 
+Instructions for build and install will go in the README.md, usage will be described in manual.md 

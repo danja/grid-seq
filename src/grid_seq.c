@@ -35,7 +35,15 @@ typedef enum {
     PORT_GRID_Y = 4,
     PORT_CURRENT_STEP = 5,
     PORT_GRID_CHANGED = 6,
-    PORT_NOTIFY = 7
+    PORT_NOTIFY = 7,
+    PORT_GRID_ROW_0 = 8,
+    PORT_GRID_ROW_1 = 9,
+    PORT_GRID_ROW_2 = 10,
+    PORT_GRID_ROW_3 = 11,
+    PORT_GRID_ROW_4 = 12,
+    PORT_GRID_ROW_5 = 13,
+    PORT_GRID_ROW_6 = 14,
+    PORT_GRID_ROW_7 = 15
 } PortIndex;
 
 typedef struct {
@@ -48,6 +56,7 @@ typedef struct {
     const float* grid_y;
     float* current_step;
     float* grid_changed;
+    float* grid_row[8];
 
     // Features
     LV2_URID_Map* map;
@@ -198,6 +207,31 @@ static void connect_port(
         case PORT_GRID_CHANGED:
             gs->grid_changed = (float*)data;
             break;
+        case PORT_GRID_ROW_0:
+        case PORT_GRID_ROW_1:
+        case PORT_GRID_ROW_2:
+        case PORT_GRID_ROW_3:
+        case PORT_GRID_ROW_4:
+        case PORT_GRID_ROW_5:
+        case PORT_GRID_ROW_6:
+        case PORT_GRID_ROW_7:
+            gs->grid_row[port - PORT_GRID_ROW_0] = (float*)data;
+            break;
+    }
+}
+
+static void update_grid_row_ports(GridSeq* gs) {
+    // Pack each row into a float (0-255)
+    for (int x = 0; x < GRID_SIZE; x++) {
+        if (gs->grid_row[x]) {
+            uint8_t row_value = 0;
+            for (int y = 0; y < GRID_SIZE; y++) {
+                if (gs->state.grid[x][y]) {
+                    row_value |= (1 << y);
+                }
+            }
+            *gs->grid_row[x] = (float)row_value;
+        }
     }
 }
 
@@ -216,54 +250,6 @@ static void send_launchpad_led(GridSeq* gs, LV2_Atom_Forge* forge, uint8_t note,
     lv2_atom_forge_frame_time(forge, 0);
     lv2_atom_forge_atom(forge, 3, gs->midi_MidiEvent);
     lv2_atom_forge_write(forge, msg, 3);
-}
-
-static void send_grid_state_update(GridSeq* gs, LV2_Atom_Forge* forge, uint8_t x, uint8_t y, bool value) {
-    // Manually construct the object to avoid forge frame issues
-    // Structure: Event header + Object header + 3 properties (each: key URID + Int atom)
-
-    // Calculate sizes
-    const uint32_t int_size = sizeof(LV2_Atom_Int);
-    const uint32_t prop_size = sizeof(LV2_Atom_Property_Body) + int_size;
-    const uint32_t obj_body_size = 3 * prop_size;  // 3 properties
-    const uint32_t obj_size = sizeof(LV2_Atom_Object_Body) + obj_body_size;
-
-    // Write event timestamp
-    lv2_atom_forge_beat_time(forge, 0.0);
-
-    // Write object header manually
-    LV2_Atom_Object obj_header = {
-        {obj_size, forge->Object},
-        {0, gs->gridState}
-    };
-    lv2_atom_forge_raw(forge, &obj_header, sizeof(obj_header));
-    lv2_atom_forge_pad(forge, sizeof(obj_header));
-
-    // Write property 1: cellX = x
-    LV2_Atom_Property_Body prop1 = {gs->cellX, 0, {int_size, gs->map->map(gs->map->handle, LV2_ATOM__Int)}};
-    lv2_atom_forge_raw(forge, &prop1, sizeof(prop1));
-    lv2_atom_forge_pad(forge, sizeof(prop1));
-    int32_t x_val = x;
-    lv2_atom_forge_raw(forge, &x_val, sizeof(x_val));
-    lv2_atom_forge_pad(forge, sizeof(x_val));
-
-    // Write property 2: cellY = y
-    LV2_Atom_Property_Body prop2 = {gs->cellY, 0, {int_size, gs->atom_Int}};
-    lv2_atom_forge_raw(forge, &prop2, sizeof(prop2));
-    lv2_atom_forge_pad(forge, sizeof(prop2));
-    int32_t y_val = y;
-    lv2_atom_forge_raw(forge, &y_val, sizeof(y_val));
-    lv2_atom_forge_pad(forge, sizeof(y_val));
-
-    // Write property 3: cellValue = value
-    LV2_Atom_Property_Body prop3 = {gs->cellValue, 0, {int_size, gs->atom_Int}};
-    lv2_atom_forge_raw(forge, &prop3, sizeof(prop3));
-    lv2_atom_forge_pad(forge, sizeof(prop3));
-    int32_t val = value ? 1 : 0;
-    lv2_atom_forge_raw(forge, &val, sizeof(val));
-    lv2_atom_forge_pad(forge, sizeof(val));
-
-    fprintf(stderr, "grid-seq: Manually wrote object for x=%d y=%d val=%d\n", x, y, value);
 }
 
 static void update_launchpad_leds(GridSeq* gs, LV2_Atom_Forge* forge) {
@@ -394,8 +380,6 @@ static void run(LV2_Handle instance, uint32_t n_samples) {
     lv2_atom_forge_set_buffer(&gs->notify_forge,
                               (uint8_t*)gs->notify,
                               notify_capacity);
-    fprintf(stderr, "grid-seq: notify forge buf=%p capacity=%u offset=%u\n",
-            (void*)gs->notify_forge.buf, notify_capacity, gs->notify_forge.offset);
 
     // Update output ports BEFORE processing
     if (gs->current_step) {
@@ -404,6 +388,9 @@ static void run(LV2_Handle instance, uint32_t n_samples) {
     if (gs->grid_changed) {
         *gs->grid_changed = (float)(gs->grid_change_counter % 1000000);
     }
+
+    // Update grid row ports with current state
+    update_grid_row_ports(gs);
 
     // Start MIDI note sequence
     LV2_Atom_Forge_Frame frame;
@@ -424,6 +411,11 @@ static void run(LV2_Handle instance, uint32_t n_samples) {
         gs->grid_dirty = true;
     }
 
+    // Calculate step position before advancing
+    uint64_t old_frame = gs->state.frame_counter;
+    uint64_t old_step_frame = old_frame % gs->state.frames_per_step;
+    bool was_before_half = old_step_frame < (gs->state.frames_per_step / 2);
+
     // Always trigger first step on first run
     if (gs->state.first_run) {
         sequencer_process_step(&gs->state, &gs->forge, &gs->seq_uris, 0);
@@ -433,6 +425,19 @@ static void run(LV2_Handle instance, uint32_t n_samples) {
     else if (sequencer_advance(&gs->state, n_samples)) {
         sequencer_process_step(&gs->state, &gs->forge, &gs->seq_uris, 0);
         gs->grid_dirty = true;  // Update LEDs when step changes
+    }
+
+    // Check if we crossed the 50% point (for Note Off)
+    uint64_t new_frame = gs->state.frame_counter;
+    uint64_t new_step_frame = new_frame % gs->state.frames_per_step;
+    bool is_after_half = new_step_frame >= (gs->state.frames_per_step / 2);
+
+    if (was_before_half && is_after_half) {
+        // Calculate frame offset to the 50% point
+        uint64_t half_point = (gs->state.frame_counter / gs->state.frames_per_step) * gs->state.frames_per_step
+                             + (gs->state.frames_per_step / 2);
+        uint32_t offset = (uint32_t)(half_point - old_frame);
+        sequencer_process_note_offs(&gs->state, &gs->forge, &gs->seq_uris, offset);
     }
 
     // End MIDI note sequence
@@ -456,18 +461,10 @@ static void run(LV2_Handle instance, uint32_t n_samples) {
         }
 
         // Write using frame_time (frames, not beats) to match working MIDI pattern
-        fprintf(stderr, "grid-seq: About to write grid, gridState URID=%u\n", gs->gridState);
+        lv2_atom_forge_frame_time(&gs->notify_forge, 0);
+        lv2_atom_forge_atom(&gs->notify_forge, 64, gs->gridState);
+        lv2_atom_forge_write(&gs->notify_forge, grid_data, 64);
 
-        LV2_Atom_Forge_Ref ref1 = lv2_atom_forge_frame_time(&gs->notify_forge, 0);
-        fprintf(stderr, "grid-seq: frame_time returned %lu\n", (unsigned long)ref1);
-
-        LV2_Atom_Forge_Ref ref2 = lv2_atom_forge_atom(&gs->notify_forge, 64, gs->gridState);
-        fprintf(stderr, "grid-seq: forge_atom returned %lu\n", (unsigned long)ref2);
-
-        LV2_Atom_Forge_Ref ref3 = lv2_atom_forge_write(&gs->notify_forge, grid_data, 64);
-        fprintf(stderr, "grid-seq: forge_write returned %lu\n", (unsigned long)ref3);
-
-        fprintf(stderr, "grid-seq: Sent full grid state to UI\n");
         gs->last_toggled_x = -1;
         gs->last_toggled_y = -1;
     }

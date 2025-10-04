@@ -35,19 +35,7 @@ void sequencer_process_step(
 ) {
     if (!state || !forge || !uris) return;
 
-    // First, send Note Off for all active notes from previous step
-    uint8_t prev_x = state->previous_step;
-    for (uint8_t y = 0; y < GRID_SIZE; y++) {
-        if (state->grid[prev_x][y]) {
-            uint8_t note = state->base_note + y;
-            if (state->active_notes[note]) {
-                s_send_midi_message(forge, uris, frame_offset, 0x80, note, 0);
-                state->active_notes[note] = false;
-            }
-        }
-    }
-
-    // Now send Note On for current step
+    // Send Note On for current step
     uint8_t x = state->current_step;
     for (uint8_t y = 0; y < GRID_SIZE; y++) {
         if (state->grid[x][y]) {
@@ -59,6 +47,23 @@ void sequencer_process_step(
 
     // Update previous step
     state->previous_step = state->current_step;
+}
+
+void sequencer_process_note_offs(
+    GridSeqState* state,
+    LV2_Atom_Forge* forge,
+    const SequencerURIDs* uris,
+    uint32_t frame_offset
+) {
+    if (!state || !forge || !uris) return;
+
+    // Send Note Off for all currently active notes
+    for (uint8_t note = 0; note < 128; note++) {
+        if (state->active_notes[note]) {
+            s_send_midi_message(forge, uris, frame_offset, 0x80, note, 0);
+            state->active_notes[note] = false;
+        }
+    }
 }
 
 bool sequencer_advance(GridSeqState* state, uint32_t n_samples) {

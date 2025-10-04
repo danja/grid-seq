@@ -252,6 +252,16 @@ static LV2UI_Handle instantiate(
             ui->atom_eventTransfer,
             NULL
         );
+
+        // Subscribe to grid row ports (8-15)
+        for (uint32_t i = 8; i <= 15; i++) {
+            ui->port_subscribe->subscribe(
+                ui->port_subscribe->handle,
+                i,
+                0,  // Control port protocol
+                NULL
+            );
+        }
     }
 
     // Return the X11 window as the widget
@@ -271,6 +281,16 @@ static void cleanup(LV2UI_Handle handle) {
             ui->atom_eventTransfer,
             NULL
         );
+
+        // Unsubscribe from grid row ports (8-15)
+        for (uint32_t i = 8; i <= 15; i++) {
+            ui->port_subscribe->unsubscribe(
+                ui->port_subscribe->handle,
+                i,
+                0,  // Control port protocol
+                NULL
+            );
+        }
     }
 
     if (ui->launchpad) {
@@ -298,22 +318,13 @@ static void port_event(
 
     // Handle atom messages (notify port)
     if (port_index == 7) {
-        fprintf(stderr, "GUI: port_event called for port 7, format=%u, eventTransfer=%u\n",
-                format, ui->atom_eventTransfer);
-
         if (format == ui->atom_eventTransfer) {
             const LV2_Atom_Sequence* seq = (const LV2_Atom_Sequence*)buffer;
-            fprintf(stderr, "GUI: Received atom sequence, size=%u\n", seq->atom.size);
 
             LV2_ATOM_SEQUENCE_FOREACH(seq, ev) {
-                fprintf(stderr, "GUI: Event body.type=%u (gridState=%u) size=%u\n",
-                        ev->body.type, ui->gridState, ev->body.size);
-
                 // Check if it's our gridState atom (full grid data)
                 if (ev->body.type == ui->gridState && ev->body.size == 64) {
                     const uint8_t* grid_data = (const uint8_t*)(&ev->body + 1);
-
-                    fprintf(stderr, "GUI: Received full grid state (%u bytes)\n", ev->body.size);
 
                     // Copy grid data
                     for (int x = 0; x < 8; x++) {
@@ -324,7 +335,6 @@ static void port_event(
 
                     // Redraw
                     draw_grid(ui);
-                    fprintf(stderr, "GUI: Grid updated and redrawn\n");
                 }
             }
         }
@@ -350,13 +360,23 @@ static void port_event(
     if (port_index == 6 && buffer) {  // PORT_GRID_CHANGED
         float grid_changed = *(const float*)buffer;
 
-        // Note: Currently the GUI maintains its own grid state which can get out of sync
-        // if the Launchpad hardware changes the pattern (since that goes through the plugin).
-        // The counter tells us something changed, but not what.
-        // TODO: Implement proper state sync using LV2 State extension or Atom messages
         if (grid_changed != ui->prev_grid_changed) {
             ui->prev_grid_changed = grid_changed;
         }
+    }
+
+    // Handle grid row ports (8-15)
+    if (port_index >= 8 && port_index <= 15 && buffer) {
+        int x = port_index - 8;
+        uint8_t row_value = (uint8_t)(*(const float*)buffer);
+
+        // Unpack bits into grid
+        for (int y = 0; y < GRID_SIZE; y++) {
+            ui->state.grid[x][y] = (row_value & (1 << y)) != 0;
+        }
+
+        // Redraw after receiving grid data
+        draw_grid(ui);
     }
 }
 

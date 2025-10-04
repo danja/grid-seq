@@ -37,6 +37,21 @@ void sequencer_process_step(
 );
 
 /**
+ * Process Note Off events for active notes (called at 50% of step).
+ *
+ * @param state Pointer to state structure
+ * @param forge Atom forge for writing MIDI events
+ * @param uris URIDs structure
+ * @param frame_offset Frame offset for MIDI events
+ */
+void sequencer_process_note_offs(
+    GridSeqState* state,
+    LV2_Atom_Forge* forge,
+    const SequencerURIDs* uris,
+    uint32_t frame_offset
+);
+
+/**
  * Advance the sequencer by n_samples.
  * Returns true if a step boundary was crossed.
  *

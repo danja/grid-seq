@@ -1,0 +1,310 @@
+/*
+ * grid-seq - Grid-based MIDI sequencer LV2 plugin
+ *
+ * Copyright (C) 2025 Danny
+ *
+ * Permission to use, copy, modify, and/or distribute this software
+ * for any purpose with or without fee is hereby granted.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL
+ * WARRANTIES WITH REGARD TO THIS SOFTWARE.
+ */
+
+#include "grid_seq/common.h"
+#include "state.h"
+
+#include <lv2/core/lv2.h>
+#include <lv2/ui/ui.h>
+#include <lv2/urid/urid.h>
+
+#include <cairo/cairo.h>
+#include <cairo/cairo-xlib.h>
+#include <X11/Xlib.h>
+#include <X11/Xutil.h>
+
+#include <stdlib.h>
+#include <string.h>
+#include <stdio.h>
+
+#define UI_URI PLUGIN_URI "#ui"
+#define WINDOW_WIDTH 480
+#define WINDOW_HEIGHT 480
+#define GRID_MARGIN 20
+#define GRID_SPACING 2
+
+// Custom URI for grid updates
+#define GRID_SEQ_URI PLUGIN_URI "#"
+#define GRID_TOGGLE_URI GRID_SEQ_URI "gridToggle"
+
+typedef struct {
+    Display* display;
+    Window window;
+    cairo_surface_t* surface;
+    cairo_t* cr;
+
+    LV2UI_Write_Function write_function;
+    LV2UI_Controller controller;
+
+    GridSeqState state;
+
+    int cell_size;
+    int idle_counter;
+    bool mapped;
+    Atom wm_delete_window;
+} GridSeqUI;
+
+static void draw_grid(GridSeqUI* ui) {
+    cairo_t* cr = ui->cr;
+
+    // Clear background
+    cairo_set_source_rgb(cr, 0.1, 0.1, 0.1);
+    cairo_paint(cr);
+
+    int grid_width = WINDOW_WIDTH - 2 * GRID_MARGIN;
+    ui->cell_size = (grid_width - (GRID_SIZE - 1) * GRID_SPACING) / GRID_SIZE;
+
+    // Draw grid cells
+    for (int x = 0; x < GRID_SIZE; x++) {
+        for (int y = 0; y < GRID_SIZE; y++) {
+            int px = GRID_MARGIN + x * (ui->cell_size + GRID_SPACING);
+            int py = GRID_MARGIN + y * (ui->cell_size + GRID_SPACING);
+
+            // Check if this step is active
+            bool is_active = ui->state.grid[x][GRID_SIZE - 1 - y];
+
+            // Check if this is the current step
+            bool is_current = (x == ui->state.current_step);
+
+            if (is_active) {
+                // Active cell - bright green
+                cairo_set_source_rgb(cr, 0.2, 0.8, 0.3);
+            } else if (is_current) {
+                // Current step but not active - dim highlight
+                cairo_set_source_rgb(cr, 0.3, 0.3, 0.4);
+            } else {
+                // Inactive cell - dark gray
+                cairo_set_source_rgb(cr, 0.2, 0.2, 0.2);
+            }
+
+            cairo_rectangle(cr, px, py, ui->cell_size, ui->cell_size);
+            cairo_fill(cr);
+
+            // Highlight current step with border
+            if (is_current) {
+                cairo_set_source_rgb(cr, 0.8, 0.8, 0.2);
+                cairo_set_line_width(cr, 2);
+                cairo_rectangle(cr, px, py, ui->cell_size, ui->cell_size);
+                cairo_stroke(cr);
+            }
+        }
+    }
+
+    // Flush to display
+    cairo_surface_flush(ui->surface);
+    XFlush(ui->display);
+}
+
+static LV2UI_Handle instantiate(
+    const LV2UI_Descriptor* descriptor,
+    const char* plugin_uri,
+    const char* bundle_path,
+    LV2UI_Write_Function write_function,
+    LV2UI_Controller controller,
+    LV2UI_Widget* widget,
+    const LV2_Feature* const* features
+) {
+    (void)descriptor;
+    (void)plugin_uri;
+    (void)bundle_path;
+
+    GridSeqUI* ui = (GridSeqUI*)calloc(1, sizeof(GridSeqUI));
+    if (!ui) return NULL;
+
+    ui->write_function = write_function;
+    ui->controller = controller;
+
+    // Initialize state
+    state_init(&ui->state, 48000.0);
+
+    // Load test pattern (same as plugin)
+    state_toggle_step(&ui->state, 0, 0);
+    state_toggle_step(&ui->state, 1, 2);
+    state_toggle_step(&ui->state, 2, 4);
+    state_toggle_step(&ui->state, 3, 5);
+    state_toggle_step(&ui->state, 4, 7);
+
+    // Create X11 window
+    ui->display = XOpenDisplay(NULL);
+    if (!ui->display) {
+        free(ui);
+        return NULL;
+    }
+
+    int screen = DefaultScreen(ui->display);
+    ui->window = XCreateSimpleWindow(
+        ui->display,
+        RootWindow(ui->display, screen),
+        0, 0, WINDOW_WIDTH, WINDOW_HEIGHT, 1,
+        BlackPixel(ui->display, screen),
+        BlackPixel(ui->display, screen)
+    );
+
+    // Don't let window manager close the window (would kill host)
+    ui->wm_delete_window = XInternAtom(ui->display, "WM_DELETE_WINDOW", False);
+    XSetWMProtocols(ui->display, ui->window, &ui->wm_delete_window, 1);
+
+    XSelectInput(ui->display, ui->window,
+                 ExposureMask | ButtonPressMask | StructureNotifyMask);
+
+    // Create Cairo surface before mapping
+    ui->surface = cairo_xlib_surface_create(
+        ui->display, ui->window,
+        DefaultVisual(ui->display, screen),
+        WINDOW_WIDTH, WINDOW_HEIGHT
+    );
+
+    ui->cr = cairo_create(ui->surface);
+
+    // Initialize state
+    ui->idle_counter = 0;
+    ui->mapped = false;
+
+    // Map the window to make it visible
+    XMapWindow(ui->display, ui->window);
+    XFlush(ui->display);
+
+    // Mark as mapped and draw
+    ui->mapped = true;
+
+    // Return the X11 window as the widget
+    *widget = (LV2UI_Widget)(unsigned long)ui->window;
+
+    return (LV2UI_Handle)ui;
+}
+
+static void cleanup(LV2UI_Handle handle) {
+    GridSeqUI* ui = (GridSeqUI*)handle;
+
+    if (ui->cr) cairo_destroy(ui->cr);
+    if (ui->surface) cairo_surface_destroy(ui->surface);
+    if (ui->display) {
+        if (ui->window) XDestroyWindow(ui->display, ui->window);
+        XCloseDisplay(ui->display);
+    }
+
+    free(ui);
+}
+
+static void port_event(
+    LV2UI_Handle handle,
+    uint32_t port_index,
+    uint32_t buffer_size,
+    uint32_t format,
+    const void* buffer
+) {
+    (void)handle;
+    (void)port_index;
+    (void)buffer_size;
+    (void)format;
+    (void)buffer;
+
+    // Handle port updates from plugin
+}
+
+static int idle(LV2UI_Handle handle) {
+    GridSeqUI* ui = (GridSeqUI*)handle;
+
+    XEvent event;
+    while (XPending(ui->display)) {
+        XNextEvent(ui->display, &event);
+
+        switch (event.type) {
+            case Expose:
+                draw_grid(ui);
+                break;
+
+            case ClientMessage:
+                // Handle window close request
+                if ((Atom)event.xclient.data.l[0] == ui->wm_delete_window) {
+                    // Don't close - just hide (host will handle cleanup)
+                    XUnmapWindow(ui->display, ui->window);
+                }
+                break;
+
+            case ButtonPress: {
+                int mx = event.xbutton.x;
+                int my = event.xbutton.y;
+
+                // Calculate which cell was clicked
+                int x = (mx - GRID_MARGIN) / (ui->cell_size + GRID_SPACING);
+                int y = (my - GRID_MARGIN) / (ui->cell_size + GRID_SPACING);
+
+                if (x >= 0 && x < GRID_SIZE && y >= 0 && y < GRID_SIZE) {
+                    // Flip Y coordinate (grid is drawn top to bottom)
+                    int grid_y = GRID_SIZE - 1 - y;
+
+                    // Toggle in local state for immediate visual feedback
+                    state_toggle_step(&ui->state, x, grid_y);
+                    draw_grid(ui);
+
+                    // Send to plugin via control ports
+                    float fx = (float)x;
+                    float fy = (float)grid_y;
+                    ui->write_function(ui->controller, 2, sizeof(float), 0, &fx);
+                    ui->write_function(ui->controller, 3, sizeof(float), 0, &fy);
+                }
+                break;
+            }
+        }
+    }
+
+    // Simulate current step animation (in real version, sync with plugin)
+    if (++ui->idle_counter > 10) {
+        ui->state.current_step = (ui->state.current_step + 1) % GRID_SIZE;
+        draw_grid(ui);
+        ui->idle_counter = 0;
+    }
+
+    return 0;
+}
+
+static int show(LV2UI_Handle handle) {
+    GridSeqUI* ui = (GridSeqUI*)handle;
+
+    // Force initial draw when shown
+    draw_grid(ui);
+
+    return 0;
+}
+
+static int hide(LV2UI_Handle handle) {
+    (void)handle;
+    return 0;
+}
+
+static const void* extension_data(const char* uri) {
+    static const LV2UI_Idle_Interface idle_interface = { idle };
+    static const LV2UI_Show_Interface show_interface = { show, hide };
+
+    if (strcmp(uri, LV2_UI__idleInterface) == 0) {
+        return &idle_interface;
+    }
+    if (strcmp(uri, LV2_UI__showInterface) == 0) {
+        return &show_interface;
+    }
+
+    return NULL;
+}
+
+static const LV2UI_Descriptor descriptor = {
+    .URI = UI_URI,
+    .instantiate = instantiate,
+    .cleanup = cleanup,
+    .port_event = port_event,
+    .extension_data = extension_data
+};
+
+LV2_SYMBOL_EXPORT
+const LV2UI_Descriptor* lv2ui_descriptor(uint32_t index) {
+    return (index == 0) ? &descriptor : NULL;
+}

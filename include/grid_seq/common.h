@@ -20,6 +20,11 @@
 #define BASE_NOTE_C2 36
 
 #define PLUGIN_URI "http://github.com/danny/grid-seq"
+#define GRID_SEQ_URI PLUGIN_URI "#"
+#define GRID_SEQ__gridState GRID_SEQ_URI "gridState"
+#define GRID_SEQ__cellX GRID_SEQ_URI "cellX"
+#define GRID_SEQ__cellY GRID_SEQ_URI "cellY"
+#define GRID_SEQ__cellValue GRID_SEQ_URI "cellValue"
 
 typedef enum {
     GS_OK = 0,

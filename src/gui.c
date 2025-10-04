@@ -17,6 +17,8 @@
 #include <lv2/core/lv2.h>
 #include <lv2/ui/ui.h>
 #include <lv2/urid/urid.h>
+#include <lv2/atom/atom.h>
+#include <lv2/atom/util.h>
 
 #include <cairo/cairo.h>
 #include <cairo/cairo-xlib.h>
@@ -57,6 +59,18 @@ typedef struct {
     LaunchpadController* launchpad;
     uint8_t prev_step;
     float prev_grid_changed;
+
+    // URIDs for atom messages
+    LV2_URID_Map* map;
+    LV2_URID gridState;
+    LV2_URID cellX;
+    LV2_URID cellY;
+    LV2_URID cellValue;
+    LV2_URID atom_Int;
+    LV2_URID atom_eventTransfer;
+
+    // Port subscription
+    const LV2UI_Port_Subscribe* port_subscribe;
 } GridSeqUI;
 
 static void draw_grid(GridSeqUI* ui) {
@@ -128,6 +142,31 @@ static LV2UI_Handle instantiate(
 
     ui->write_function = write_function;
     ui->controller = controller;
+
+    // Get required features
+    ui->map = NULL;
+    ui->port_subscribe = NULL;
+
+    for (int i = 0; features[i]; i++) {
+        if (strcmp(features[i]->URI, LV2_URID__map) == 0) {
+            ui->map = (LV2_URID_Map*)features[i]->data;
+        } else if (strcmp(features[i]->URI, LV2_UI__portSubscribe) == 0) {
+            ui->port_subscribe = (const LV2UI_Port_Subscribe*)features[i]->data;
+        }
+    }
+
+    if (!ui->map) {
+        free(ui);
+        return NULL;
+    }
+
+    // Map URIDs
+    ui->gridState = ui->map->map(ui->map->handle, GRID_SEQ__gridState);
+    ui->cellX = ui->map->map(ui->map->handle, GRID_SEQ__cellX);
+    ui->cellY = ui->map->map(ui->map->handle, GRID_SEQ__cellY);
+    ui->cellValue = ui->map->map(ui->map->handle, GRID_SEQ__cellValue);
+    ui->atom_Int = ui->map->map(ui->map->handle, LV2_ATOM__Int);
+    ui->atom_eventTransfer = ui->map->map(ui->map->handle, LV2_ATOM__eventTransfer);
 
     // Initialize state
     state_init(&ui->state, 48000.0);
@@ -205,6 +244,16 @@ static LV2UI_Handle instantiate(
     ui->prev_step = 0;
     ui->prev_grid_changed = 0.0f;
 
+    // Subscribe to notify port to receive grid state updates
+    if (ui->port_subscribe) {
+        ui->port_subscribe->subscribe(
+            ui->port_subscribe->handle,
+            7,  // PORT_NOTIFY
+            ui->atom_eventTransfer,
+            NULL
+        );
+    }
+
     // Return the X11 window as the widget
     *widget = (LV2UI_Widget)(unsigned long)ui->window;
 
@@ -213,6 +262,16 @@ static LV2UI_Handle instantiate(
 
 static void cleanup(LV2UI_Handle handle) {
     GridSeqUI* ui = (GridSeqUI*)handle;
+
+    // Unsubscribe from notify port
+    if (ui->port_subscribe) {
+        ui->port_subscribe->unsubscribe(
+            ui->port_subscribe->handle,
+            7,  // PORT_NOTIFY
+            ui->atom_eventTransfer,
+            NULL
+        );
+    }
 
     if (ui->launchpad) {
         launchpad_cleanup(ui->launchpad);
@@ -236,8 +295,45 @@ static void port_event(
     const void* buffer
 ) {
     GridSeqUI* ui = (GridSeqUI*)handle;
+
+    // Handle atom messages (notify port)
+    if (port_index == 7 && format == ui->atom_eventTransfer) {
+        const LV2_Atom_Sequence* seq = (const LV2_Atom_Sequence*)buffer;
+
+        LV2_ATOM_SEQUENCE_FOREACH(seq, ev) {
+            const LV2_Atom_Object* obj = (const LV2_Atom_Object*)&ev->body;
+
+            if (obj->body.otype == ui->gridState) {
+                // Extract cell coordinates and value
+                const LV2_Atom* x_atom = NULL;
+                const LV2_Atom* y_atom = NULL;
+                const LV2_Atom* val_atom = NULL;
+
+                lv2_atom_object_get(obj,
+                    ui->cellX, &x_atom,
+                    ui->cellY, &y_atom,
+                    ui->cellValue, &val_atom,
+                    0);
+
+                if (x_atom && y_atom && val_atom &&
+                    x_atom->type == ui->atom_Int &&
+                    y_atom->type == ui->atom_Int &&
+                    val_atom->type == ui->atom_Int) {
+
+                    int x = ((const LV2_Atom_Int*)x_atom)->body;
+                    int y = ((const LV2_Atom_Int*)y_atom)->body;
+                    int value = ((const LV2_Atom_Int*)val_atom)->body;
+
+                    if (x >= 0 && x < GRID_SIZE && y >= 0 && y < GRID_SIZE) {
+                        ui->state.grid[x][y] = (value != 0);
+                        draw_grid(ui);
+                    }
+                }
+            }
+        }
+    }
+
     (void)buffer_size;
-    (void)format;
 
     // Handle current step updates from plugin
     if (port_index == 5 && buffer) {  // PORT_CURRENT_STEP

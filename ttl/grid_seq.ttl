@@ -78,6 +78,14 @@
         lv2:default 0 ;
         lv2:minimum 0 ;
         lv2:maximum 999999
+    ] , [
+        a lv2:OutputPort ,
+            atom:AtomPort ;
+        atom:bufferType atom:Sequence ;
+        lv2:index 7 ;
+        lv2:symbol "notify" ;
+        lv2:name "UI Notifications" ;
+        lv2:designation lv2:control
     ] .
 
 <http://github.com/danny/grid-seq#ui>

@@ -34,7 +34,8 @@ typedef enum {
     PORT_GRID_X = 3,
     PORT_GRID_Y = 4,
     PORT_CURRENT_STEP = 5,
-    PORT_GRID_CHANGED = 6
+    PORT_GRID_CHANGED = 6,
+    PORT_NOTIFY = 7
 } PortIndex;
 
 typedef struct {
@@ -42,6 +43,7 @@ typedef struct {
     const LV2_Atom_Sequence* midi_in;
     LV2_Atom_Sequence* midi_out;
     LV2_Atom_Sequence* launchpad_out;
+    LV2_Atom_Sequence* notify;
     const float* grid_x;
     const float* grid_y;
     float* current_step;
@@ -54,9 +56,14 @@ typedef struct {
     LV2_URID midi_MidiEvent;
     LV2_URID atom_Blank;
     LV2_URID atom_Object;
+    LV2_URID atom_Int;
     LV2_URID time_Position;
     LV2_URID time_beatsPerMinute;
     LV2_URID time_speed;
+    LV2_URID gridState;
+    LV2_URID cellX;
+    LV2_URID cellY;
+    LV2_URID cellValue;
 
     // State
     GridSeqState state;
@@ -77,8 +84,15 @@ typedef struct {
     // Separate forge for Launchpad
     LV2_Atom_Forge launchpad_forge;
 
+    // Separate forge for UI notifications
+    LV2_Atom_Forge notify_forge;
+
     // Grid change counter
     uint32_t grid_change_counter;
+
+    // Track last toggled cell for UI notification
+    int8_t last_toggled_x;
+    int8_t last_toggled_y;
 } GridSeq;
 
 static LV2_Handle instantiate(
@@ -109,9 +123,14 @@ static LV2_Handle instantiate(
     gs->midi_MidiEvent = gs->map->map(gs->map->handle, LV2_MIDI__MidiEvent);
     gs->atom_Blank = gs->map->map(gs->map->handle, LV2_ATOM__Blank);
     gs->atom_Object = gs->map->map(gs->map->handle, LV2_ATOM__Object);
+    gs->atom_Int = gs->map->map(gs->map->handle, LV2_ATOM__Int);
     gs->time_Position = gs->map->map(gs->map->handle, LV2_TIME__Position);
     gs->time_beatsPerMinute = gs->map->map(gs->map->handle, LV2_TIME__beatsPerMinute);
     gs->time_speed = gs->map->map(gs->map->handle, LV2_TIME__speed);
+    gs->gridState = gs->map->map(gs->map->handle, GRID_SEQ__gridState);
+    gs->cellX = gs->map->map(gs->map->handle, GRID_SEQ__cellX);
+    gs->cellY = gs->map->map(gs->map->handle, GRID_SEQ__cellY);
+    gs->cellValue = gs->map->map(gs->map->handle, GRID_SEQ__cellValue);
 
     gs->seq_uris.midi_MidiEvent = gs->midi_MidiEvent;
 
@@ -121,6 +140,7 @@ static LV2_Handle instantiate(
     // Initialize atom forges
     lv2_atom_forge_init(&gs->forge, gs->map);
     lv2_atom_forge_init(&gs->launchpad_forge, gs->map);
+    lv2_atom_forge_init(&gs->notify_forge, gs->map);
 
     // Set up a simple test pattern - single note per step for easy testing
     state_toggle_step(&gs->state, 0, 0);  // Step 0: C2
@@ -138,6 +158,10 @@ static LV2_Handle instantiate(
     gs->launchpad_mode_entered = false;
     gs->prev_led_step = 0;
     gs->grid_dirty = true;
+
+    // Initialize toggle tracking
+    gs->last_toggled_x = -1;
+    gs->last_toggled_y = -1;
 
     return (LV2_Handle)gs;
 }
@@ -158,6 +182,9 @@ static void connect_port(
             break;
         case PORT_LAUNCHPAD_OUT:
             gs->launchpad_out = (LV2_Atom_Sequence*)data;
+            break;
+        case PORT_NOTIFY:
+            gs->notify = (LV2_Atom_Sequence*)data;
             break;
         case PORT_GRID_X:
             gs->grid_x = (const float*)data;
@@ -189,6 +216,20 @@ static void send_launchpad_led(GridSeq* gs, LV2_Atom_Forge* forge, uint8_t note,
     lv2_atom_forge_frame_time(forge, 0);
     lv2_atom_forge_atom(forge, 3, gs->midi_MidiEvent);
     lv2_atom_forge_write(forge, msg, 3);
+}
+
+static void send_grid_state_update(GridSeq* gs, LV2_Atom_Forge* forge, uint8_t x, uint8_t y, bool value) {
+    LV2_Atom_Forge_Frame frame;
+
+    lv2_atom_forge_frame_time(forge, 0);
+    lv2_atom_forge_object(forge, &frame, 0, gs->gridState);
+    lv2_atom_forge_key(forge, gs->cellX);
+    lv2_atom_forge_int(forge, x);
+    lv2_atom_forge_key(forge, gs->cellY);
+    lv2_atom_forge_int(forge, y);
+    lv2_atom_forge_key(forge, gs->cellValue);
+    lv2_atom_forge_int(forge, value ? 1 : 0);
+    lv2_atom_forge_pop(forge, &frame);
 }
 
 static void update_launchpad_leds(GridSeq* gs, LV2_Atom_Forge* forge) {
@@ -276,6 +317,8 @@ static void run(LV2_Handle instance, uint32_t n_samples) {
                         state_toggle_step(&gs->state, x, y);
                         gs->grid_dirty = true;
                         gs->grid_change_counter++;
+                        gs->last_toggled_x = x;
+                        gs->last_toggled_y = y;
                     }
                 }
             }
@@ -295,6 +338,8 @@ static void run(LV2_Handle instance, uint32_t n_samples) {
             gs->prev_grid_y = y;
             gs->grid_dirty = true;
             gs->grid_change_counter++;
+            gs->last_toggled_x = (int8_t)x;
+            gs->last_toggled_y = (int8_t)y;
         }
     }
 
@@ -309,6 +354,12 @@ static void run(LV2_Handle instance, uint32_t n_samples) {
     lv2_atom_forge_set_buffer(&gs->launchpad_forge,
                               (uint8_t*)gs->launchpad_out,
                               lp_capacity);
+
+    // Setup forge for UI notifications
+    const uint32_t notify_capacity = gs->notify->atom.size;
+    lv2_atom_forge_set_buffer(&gs->notify_forge,
+                              (uint8_t*)gs->notify,
+                              notify_capacity);
 
     // Update output ports BEFORE processing
     if (gs->current_step) {
@@ -325,6 +376,10 @@ static void run(LV2_Handle instance, uint32_t n_samples) {
     // Start Launchpad control sequence
     LV2_Atom_Forge_Frame lp_frame;
     lv2_atom_forge_sequence_head(&gs->launchpad_forge, &lp_frame, 0);
+
+    // Start UI notification sequence
+    LV2_Atom_Forge_Frame notify_frame;
+    lv2_atom_forge_sequence_head(&gs->notify_forge, &notify_frame, 0);
 
     // Enter Programmer Mode on first run
     if (!gs->launchpad_mode_entered) {
@@ -354,8 +409,19 @@ static void run(LV2_Handle instance, uint32_t n_samples) {
         gs->prev_led_step = gs->state.current_step;
     }
 
+    // Send grid state update to UI if a cell was toggled
+    if (gs->last_toggled_x >= 0 && gs->last_toggled_y >= 0) {
+        bool value = gs->state.grid[gs->last_toggled_x][gs->last_toggled_y];
+        send_grid_state_update(gs, &gs->notify_forge, gs->last_toggled_x, gs->last_toggled_y, value);
+        gs->last_toggled_x = -1;
+        gs->last_toggled_y = -1;
+    }
+
     // End Launchpad control sequence
     lv2_atom_forge_pop(&gs->launchpad_forge, &lp_frame);
+
+    // End UI notification sequence
+    lv2_atom_forge_pop(&gs->notify_forge, &notify_frame);
 }
 
 static void deactivate(LV2_Handle instance) {

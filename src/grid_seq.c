@@ -43,7 +43,16 @@ typedef enum {
     PORT_GRID_ROW_4 = 12,
     PORT_GRID_ROW_5 = 13,
     PORT_GRID_ROW_6 = 14,
-    PORT_GRID_ROW_7 = 15
+    PORT_GRID_ROW_7 = 15,
+    PORT_GRID_ROW_8 = 16,
+    PORT_GRID_ROW_9 = 17,
+    PORT_GRID_ROW_10 = 18,
+    PORT_GRID_ROW_11 = 19,
+    PORT_GRID_ROW_12 = 20,
+    PORT_GRID_ROW_13 = 21,
+    PORT_GRID_ROW_14 = 22,
+    PORT_GRID_ROW_15 = 23,
+    PORT_SEQUENCE_LENGTH = 24
 } PortIndex;
 
 typedef struct {
@@ -56,7 +65,8 @@ typedef struct {
     const float* grid_y;
     float* current_step;
     float* grid_changed;
-    float* grid_row[8];
+    float* grid_row[MAX_GRID_SIZE];
+    const float* sequence_length;
 
     // Features
     LV2_URID_Map* map;
@@ -215,17 +225,28 @@ static void connect_port(
         case PORT_GRID_ROW_5:
         case PORT_GRID_ROW_6:
         case PORT_GRID_ROW_7:
+        case PORT_GRID_ROW_8:
+        case PORT_GRID_ROW_9:
+        case PORT_GRID_ROW_10:
+        case PORT_GRID_ROW_11:
+        case PORT_GRID_ROW_12:
+        case PORT_GRID_ROW_13:
+        case PORT_GRID_ROW_14:
+        case PORT_GRID_ROW_15:
             gs->grid_row[port - PORT_GRID_ROW_0] = (float*)data;
+            break;
+        case PORT_SEQUENCE_LENGTH:
+            gs->sequence_length = (const float*)data;
             break;
     }
 }
 
 static void update_grid_row_ports(GridSeq* gs) {
     // Pack each row into a float (0-255)
-    for (int x = 0; x < GRID_SIZE; x++) {
+    for (int x = 0; x < MAX_GRID_SIZE; x++) {
         if (gs->grid_row[x]) {
             uint8_t row_value = 0;
-            for (int y = 0; y < GRID_SIZE; y++) {
+            for (int y = 0; y < GRID_ROWS; y++) {
                 if (gs->state.grid[x][y]) {
                     row_value |= (1 << y);
                 }
@@ -253,15 +274,26 @@ static void send_launchpad_led(GridSeq* gs, LV2_Atom_Forge* forge, uint8_t note,
 }
 
 static void update_launchpad_leds(GridSeq* gs, LV2_Atom_Forge* forge) {
-    for (uint8_t x = 0; x < GRID_SIZE; x++) {
-        for (uint8_t y = 0; y < GRID_SIZE; y++) {
+    // Calculate which steps to show based on current hardware page
+    uint8_t page_offset = gs->state.hardware_page * 8;
+
+    for (uint8_t x = 0; x < 8; x++) {
+        for (uint8_t y = 0; y < 8; y++) {
             uint8_t note = lp_grid_to_note(x, y);
+            uint8_t actual_step = page_offset + x;
             uint8_t color;
 
-            if (x == gs->state.current_step) {
-                color = gs->state.grid[x][y] ? LP_COLOR_YELLOW : LP_COLOR_GREEN_DIM;
-            } else {
-                color = gs->state.grid[x][y] ? LP_COLOR_GREEN : LP_COLOR_OFF;
+            // If this column is beyond sequence length, turn it off
+            if (actual_step >= gs->state.sequence_length) {
+                color = LP_COLOR_OFF;
+            }
+            // Check if this is the current playing step
+            else if (actual_step == gs->state.current_step) {
+                color = gs->state.grid[actual_step][y] ? LP_COLOR_YELLOW : LP_COLOR_GREEN_DIM;
+            }
+            // Normal step coloring
+            else {
+                color = gs->state.grid[actual_step][y] ? LP_COLOR_GREEN : LP_COLOR_OFF;
             }
 
             send_launchpad_led(gs, forge, note, color);
@@ -281,6 +313,14 @@ static void activate(LV2_Handle instance) {
 
 static void run(LV2_Handle instance, uint32_t n_samples) {
     GridSeq* gs = (GridSeq*)instance;
+
+    // Read sequence length from port and update state
+    if (gs->sequence_length) {
+        uint8_t new_length = (uint8_t)(*gs->sequence_length);
+        if (new_length >= MIN_SEQUENCE_LENGTH && new_length <= MAX_SEQUENCE_LENGTH) {
+            gs->state.sequence_length = new_length;
+        }
+    }
 
     // Process incoming MIDI and Time position
     LV2_ATOM_SEQUENCE_FOREACH(gs->midi_in, ev) {
@@ -333,12 +373,38 @@ static void run(LV2_Handle instance, uint32_t n_samples) {
                     uint8_t x, y;
                     lp_note_to_grid(note, &x, &y);
 
-                    if (x < GRID_SIZE && y < GRID_SIZE) {
-                        state_toggle_step(&gs->state, x, y);
-                        gs->grid_dirty = true;
-                        gs->grid_change_counter++;
-                        gs->last_toggled_x = x;
-                        gs->last_toggled_y = y;
+                    if (x < 8 && y < 8) {
+                        // Calculate actual grid position based on hardware page
+                        uint8_t actual_x = x + (gs->state.hardware_page * 8);
+                        if (actual_x < gs->state.sequence_length) {
+                            state_toggle_step(&gs->state, actual_x, y);
+                            gs->grid_dirty = true;
+                            gs->grid_change_counter++;
+                            gs->last_toggled_x = actual_x;
+                            gs->last_toggled_y = y;
+                        }
+                    }
+                }
+            }
+            // Control Change (0xB0) - for Launchpad arrow buttons
+            else if ((msg[0] & 0xF0) == 0xB0) {
+                uint8_t cc = msg[1];
+                uint8_t value = msg[2];
+
+                // Only allow page switching when not playing
+                if (!gs->state.playing && value > 0) {
+                    if (cc == 91) {  // Left arrow (CC 91)
+                        if (gs->state.hardware_page > 0) {
+                            gs->state.hardware_page--;
+                            gs->grid_dirty = true;
+                        }
+                    }
+                    else if (cc == 92) {  // Right arrow (CC 92)
+                        // Only switch to page 1 if sequence length > 8
+                        if (gs->state.sequence_length > 8 && gs->state.hardware_page == 0) {
+                            gs->state.hardware_page = 1;
+                            gs->grid_dirty = true;
+                        }
                     }
                 }
             }

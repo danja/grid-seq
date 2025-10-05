@@ -22,6 +22,8 @@ void state_init(GridSeqState* state, double sample_rate) {
     state->sample_rate = sample_rate;
     state->current_step = 0;
     state->previous_step = 0;
+    state->sequence_length = DEFAULT_SEQUENCE_LENGTH;
+    state->hardware_page = 0;
     state->playing = false;
     state->frame_counter = 0;
 
@@ -31,7 +33,7 @@ void state_init(GridSeqState* state, double sample_rate) {
 }
 
 void state_toggle_step(GridSeqState* state, uint8_t x, uint8_t y) {
-    if (!state || x >= GRID_SIZE || y >= GRID_SIZE) return;
+    if (!state || x >= MAX_GRID_SIZE || y >= GRID_ROWS) return;
 
     state->grid[x][y] = !state->grid[x][y];
 }

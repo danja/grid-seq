@@ -7,6 +7,7 @@ project('grid-seq', 'c',
 lv2_dep = dependency('lv2')
 cairo_dep = dependency('cairo')
 x11_dep = dependency('x11')
+gtk3_dep = dependency('gtk+-3.0')
 
 # Include directories
 inc = include_directories('include')
@@ -40,7 +41,7 @@ shared_library('grid_seq',
 shared_library('grid_seq_ui',
   ui_sources,
   include_directories: inc,
-  dependencies: [lv2_dep, cairo_dep, x11_dep],
+  dependencies: [lv2_dep, cairo_dep, gtk3_dep],
   name_prefix: '',
   install: true,
   install_dir: get_option('libdir') / 'lv2' / 'grid-seq.lv2'

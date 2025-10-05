@@ -16,8 +16,13 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-#define GRID_SIZE 8
+#define MAX_GRID_SIZE 16
+#define GRID_SIZE 8  // Default size (for backward compatibility)
+#define GRID_ROWS 8  // Number of note rows (fixed)
 #define BASE_NOTE_C2 36
+#define MIN_SEQUENCE_LENGTH 2
+#define MAX_SEQUENCE_LENGTH 16
+#define DEFAULT_SEQUENCE_LENGTH 8
 
 #define PLUGIN_URI "http://github.com/danny/grid-seq"
 #define GRID_SEQ_URI PLUGIN_URI "#"

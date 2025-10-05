@@ -16,10 +16,12 @@
 #include "grid_seq/common.h"
 
 typedef struct {
-    bool grid[GRID_SIZE][GRID_SIZE];
+    bool grid[MAX_GRID_SIZE][GRID_ROWS];
     uint8_t base_note;
     uint8_t current_step;
     uint8_t previous_step;
+    uint8_t sequence_length;    // 2-16 steps
+    uint8_t hardware_page;      // 0 or 1 for Launchpad paging
     double beats_per_bar;
     double sample_rate;
     bool playing;

@@ -74,7 +74,7 @@ bool sequencer_advance(GridSeqState* state, uint32_t n_samples) {
     uint64_t new_step = state->frame_counter / state->frames_per_step;
 
     if (new_step != old_step) {
-        state->current_step = (uint8_t)(new_step % GRID_SIZE);
+        state->current_step = (uint8_t)(new_step % state->sequence_length);
         return true;
     }
 

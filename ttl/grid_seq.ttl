@@ -243,7 +243,7 @@
     ] .
 
 <http://github.com/danny/grid-seq#ui>
-    a ui:GtkUI ;
+    a ui:X11UI ;
     ui:binary <grid_seq_ui.so> ;
     lv2:requiredFeature ui:idleInterface ;
     lv2:extensionData ui:idleInterface .

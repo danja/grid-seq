@@ -11,6 +11,7 @@
  */
 
 #include "sequencer.h"
+#include <stdio.h>
 
 static void s_send_midi_message(
     LV2_Atom_Forge* forge,
@@ -21,6 +22,8 @@ static void s_send_midi_message(
     uint8_t velocity
 ) {
     uint8_t midi_data[3] = {status, note, velocity};
+
+    fprintf(stderr, "grid-seq: MIDI OUTPUT - status=0x%02X note=%d vel=%d\n", status, note, velocity);
 
     lv2_atom_forge_frame_time(forge, frame_offset);
     lv2_atom_forge_atom(forge, 3, uris->midi_MidiEvent);
@@ -37,9 +40,29 @@ void sequencer_process_step(
 
     // Send Note On for current step
     uint8_t x = state->current_step;
-    for (uint8_t y = 0; y < GRID_SIZE; y++) {
+
+    // Count active notes in this step
+    int active_count = 0;
+    for (uint8_t y = 0; y < GRID_ROWS; y++) {
+        if (state->grid[x][y]) active_count++;
+    }
+
+    // Only log if there are active notes OR first few steps
+    static int step_count = 0;
+    if (active_count > 0 || step_count < 8) {
+        fprintf(stderr, "grid-seq: Step %d, active=%d, grid: ", x, active_count);
+        for (uint8_t y = 0; y < GRID_ROWS; y++) {
+            fprintf(stderr, "%d", state->grid[x][y] ? 1 : 0);
+        }
+        fprintf(stderr, "\n");
+        step_count++;
+    }
+
+    for (uint8_t y = 0; y < GRID_ROWS; y++) {
         if (state->grid[x][y]) {
             uint8_t note = state->base_note + y;
+            fprintf(stderr, "  -> SENDING NOTE ON: %d (base %d + offset %d) from grid[%d][%d]\n",
+                    note, state->base_note, y, x, y);
             s_send_midi_message(forge, uris, frame_offset, 0x90, note, 100);
             state->active_notes[note] = true;
         }

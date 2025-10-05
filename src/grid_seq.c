@@ -161,13 +161,8 @@ static LV2_Handle instantiate(
     lv2_atom_forge_init(&gs->launchpad_forge, gs->map);
     lv2_atom_forge_init(&gs->notify_forge, gs->map);
 
-    // Set up a simple test pattern - single note per step for easy testing
-    state_toggle_step(&gs->state, 0, 0);  // Step 0: C2
-    state_toggle_step(&gs->state, 1, 2);  // Step 1: D2
-    state_toggle_step(&gs->state, 2, 4);  // Step 2: E2
-    state_toggle_step(&gs->state, 3, 5);  // Step 3: F2
-    state_toggle_step(&gs->state, 4, 7);  // Step 4: G2
-    // Steps 5-7 silent
+    // Initialize grid state (empty - will be set by user or host state)
+    // Grid is already zeroed by state_init() called above
 
     // Initialize previous control values
     gs->prev_grid_x = -1.0f;
@@ -256,9 +251,32 @@ static void update_grid_row_ports(GridSeq* gs) {
     }
 }
 
+static void read_grid_row_ports(GridSeq* gs) {
+    // Read persisted port values into grid state
+    fprintf(stderr, "grid-seq: Reading persisted grid state from ports:\n");
+    for (int x = 0; x < MAX_GRID_SIZE; x++) {
+        if (gs->grid_row[x]) {
+            uint8_t row_value = (uint8_t)(*gs->grid_row[x]);
+            if (row_value != 0) {
+                fprintf(stderr, "  Column %d: value=%d (0x%02X)\n", x, row_value, row_value);
+            }
+            for (int y = 0; y < GRID_ROWS; y++) {
+                gs->state.grid[x][y] = (row_value & (1 << y)) != 0;
+            }
+        }
+    }
+}
+
 static void send_sysex_programmer_mode(GridSeq* gs, LV2_Atom_Forge* forge, bool enter) {
     // SysEx: F0 00 20 29 02 0D 0E [01/00] F7
     uint8_t sysex[] = {0xF0, 0x00, 0x20, 0x29, 0x02, 0x0D, 0x0E, enter ? 0x01 : 0x00, 0xF7};
+
+    fprintf(stderr, "grid-seq: Sending SysEx to %s Programmer Mode\n", enter ? "ENTER" : "EXIT");
+    fprintf(stderr, "  SysEx bytes: ");
+    for (size_t i = 0; i < sizeof(sysex); i++) {
+        fprintf(stderr, "%02X ", sysex[i]);
+    }
+    fprintf(stderr, "\n");
 
     lv2_atom_forge_frame_time(forge, 0);
     lv2_atom_forge_atom(forge, sizeof(sysex), gs->midi_MidiEvent);
@@ -266,7 +284,10 @@ static void send_sysex_programmer_mode(GridSeq* gs, LV2_Atom_Forge* forge, bool 
 }
 
 static void send_launchpad_led(GridSeq* gs, LV2_Atom_Forge* forge, uint8_t note, uint8_t color) {
-    uint8_t msg[3] = {0x90, note, color};
+    // LED commands on channel 16 (0x9F) to avoid triggering synths
+    // Launchpad accepts LED commands on any channel in Programmer Mode
+    // Musical notes use channel 1 (0x90) from sequencer
+    uint8_t msg[3] = {0x9F, note, color};
 
     lv2_atom_forge_frame_time(forge, 0);
     lv2_atom_forge_atom(forge, 3, gs->midi_MidiEvent);
@@ -303,6 +324,22 @@ static void update_launchpad_leds(GridSeq* gs, LV2_Atom_Forge* forge) {
 
 static void activate(LV2_Handle instance) {
     GridSeq* gs = (GridSeq*)instance;
+
+    // TEMPORARY: Force clear all grid state to debug ascending scale
+    fprintf(stderr, "grid-seq: Clearing all grid state in activate()\n");
+    for (int x = 0; x < MAX_GRID_SIZE; x++) {
+        for (int y = 0; y < GRID_ROWS; y++) {
+            gs->state.grid[x][y] = false;
+        }
+    }
+
+    // Read any persisted grid state from ports (e.g., from host project file)
+    // COMMENTED OUT to test if persisted data is the problem
+    // read_grid_row_ports(gs);
+
+    // Reset launchpad mode flag so SysEx is sent again on next run()
+    gs->launchpad_mode_entered = false;
+
     gs->state.playing = true;
     gs->state.frame_counter = 0;
     gs->state.current_step = 0;
@@ -373,10 +410,16 @@ static void run(LV2_Handle instance, uint32_t n_samples) {
                     uint8_t x, y;
                     lp_note_to_grid(note, &x, &y);
 
+                    fprintf(stderr, "grid-seq: Launchpad pad pressed - MIDI note=%d -> grid x=%d y=%d\n",
+                            note, x, y);
+
                     if (x < 8 && y < 8) {
                         // Calculate actual grid position based on hardware page
                         uint8_t actual_x = x + (gs->state.hardware_page * 8);
                         if (actual_x < gs->state.sequence_length) {
+                            fprintf(stderr, "  -> Toggling grid[%d][%d], page=%d, new_value=%d\n",
+                                    actual_x, y, gs->state.hardware_page,
+                                    !gs->state.grid[actual_x][y]);
                             state_toggle_step(&gs->state, actual_x, y);
                             gs->grid_dirty = true;
                             gs->grid_change_counter++;
@@ -411,15 +454,80 @@ static void run(LV2_Handle instance, uint32_t n_samples) {
         }
     }
 
-    // Check for grid toggle from UI
+    // Check for grid toggle from UI or hardware reset signal
     if (gs->grid_x && gs->grid_y) {
         float x = *gs->grid_x;
         float y = *gs->grid_y;
 
+        // Check for device query signal (x == -200)
+        if (x == -200.0f && x != gs->prev_grid_x) {
+            fprintf(stderr, "\n=== DEVICE QUERY REQUESTED ===\n");
+
+            // Send Device Inquiry SysEx: F0 7E 7F 06 01 F7
+            uint8_t inquiry[] = {0xF0, 0x7E, 0x7F, 0x06, 0x01, 0xF7};
+            fprintf(stderr, "Sending Universal Device Inquiry: ");
+            for (size_t i = 0; i < sizeof(inquiry); i++) {
+                fprintf(stderr, "%02X ", inquiry[i]);
+            }
+            fprintf(stderr, "\n");
+
+            lv2_atom_forge_frame_time(&gs->forge, 0);
+            lv2_atom_forge_atom(&gs->forge, sizeof(inquiry), gs->midi_MidiEvent);
+            lv2_atom_forge_write(&gs->forge, inquiry, sizeof(inquiry));
+
+            lv2_atom_forge_frame_time(&gs->launchpad_forge, 0);
+            lv2_atom_forge_atom(&gs->launchpad_forge, sizeof(inquiry), gs->midi_MidiEvent);
+            lv2_atom_forge_write(&gs->launchpad_forge, inquiry, sizeof(inquiry));
+
+            fprintf(stderr, "Sent to both outputs. Watch MIDI input for response.\n");
+            fprintf(stderr, "Expected response starts with: F0 7E 00 06 02...\n");
+            fprintf(stderr, "==============================\n\n");
+
+            gs->prev_grid_x = x;
+            return;
+        }
+
+        // Check for hardware reset signal (x == -100)
+        if (x == -100.0f && x != gs->prev_grid_x) {
+            fprintf(stderr, "\n=== HARDWARE RESET REQUESTED ===\n");
+            fprintf(stderr, "Querying Launchpad state...\n");
+
+            // Send Device Inquiry SysEx: F0 7E 7F 06 01 F7
+            uint8_t inquiry[] = {0xF0, 0x7E, 0x7F, 0x06, 0x01, 0xF7};
+            lv2_atom_forge_frame_time(&gs->forge, 0);
+            lv2_atom_forge_atom(&gs->forge, sizeof(inquiry), gs->midi_MidiEvent);
+            lv2_atom_forge_write(&gs->forge, inquiry, sizeof(inquiry));
+            fprintf(stderr, "Sent Device Inquiry SysEx to main output\n");
+
+            // Force exit Programmer Mode first
+            fprintf(stderr, "Sending EXIT Programmer Mode...\n");
+            send_sysex_programmer_mode(gs, &gs->forge, false);
+            send_sysex_programmer_mode(gs, &gs->launchpad_forge, false);
+
+            // Wait a moment (flag will be reset so it re-enters on next run)
+            gs->launchpad_mode_entered = false;
+
+            fprintf(stderr, "Launchpad reset sequence initiated. Will re-enter Programmer Mode on next cycle.\n");
+            fprintf(stderr, "================================\n\n");
+
+            gs->prev_grid_x = x;
+            return;
+        }
+
         // If values changed and are valid, toggle the grid cell
         if ((x != gs->prev_grid_x || y != gs->prev_grid_y) &&
-            x >= 0 && x < GRID_SIZE && y >= 0 && y < GRID_SIZE) {
+            x >= 0 && x < MAX_GRID_SIZE && y >= 0 && y < GRID_ROWS) {
+            fprintf(stderr, "grid-seq: Plugin toggling cell [%d,%d], new value: %d\n",
+                    (int)x, (int)y, !gs->state.grid[(int)x][(int)y]);
             state_toggle_step(&gs->state, (uint8_t)x, (uint8_t)y);
+
+            // Dump grid state for this column
+            fprintf(stderr, "  Column %d state: ", (int)x);
+            for (int ny = 0; ny < GRID_ROWS; ny++) {
+                fprintf(stderr, "%d", gs->state.grid[(int)x][ny] ? 1 : 0);
+            }
+            fprintf(stderr, " (bit 0=bottom note, bit 7=top note)\n");
+
             gs->prev_grid_x = x;
             gs->prev_grid_y = y;
             gs->grid_dirty = true;
@@ -471,10 +579,13 @@ static void run(LV2_Handle instance, uint32_t n_samples) {
     lv2_atom_forge_sequence_head(&gs->notify_forge, &notify_frame, 0);
 
     // Enter Programmer Mode on first run
+    // IMPORTANT: Send to BOTH midi_out and launchpad_out to ensure it reaches the device
     if (!gs->launchpad_mode_entered) {
-        send_sysex_programmer_mode(gs, &gs->launchpad_forge, true);
+        send_sysex_programmer_mode(gs, &gs->forge, true);  // Main MIDI output
+        send_sysex_programmer_mode(gs, &gs->launchpad_forge, true);  // Launchpad output
         gs->launchpad_mode_entered = true;
         gs->grid_dirty = true;
+        fprintf(stderr, "grid-seq: Sent Programmer Mode SysEx to both outputs\n");
     }
 
     // Calculate step position before advancing

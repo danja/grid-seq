@@ -12,7 +12,6 @@
 
 #include "grid_seq/common.h"
 #include "state.h"
-#include "launchpad.h"
 
 #include <lv2/core/lv2.h>
 #include <lv2/ui/ui.h>
@@ -20,30 +19,40 @@
 #include <lv2/atom/atom.h>
 #include <lv2/atom/util.h>
 
+#include <gtk/gtk.h>
+#include <gtk/gtkx.h>
+#include <gdk/gdkx.h>
 #include <cairo/cairo.h>
-#include <cairo/cairo-xlib.h>
 #include <X11/Xlib.h>
-#include <X11/Xutil.h>
 
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#define _USE_MATH_DEFINES
+#include <math.h>
+#include <stdint.h>
+
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
 
 #define UI_URI PLUGIN_URI "#ui"
-#define WINDOW_WIDTH 480
-#define WINDOW_HEIGHT 480
+#define MENU_HEIGHT 30
+#define WINDOW_WIDTH 640
+#define WINDOW_HEIGHT (480 + MENU_HEIGHT)
 #define GRID_MARGIN 20
 #define GRID_SPACING 2
 
-// Custom URI for grid updates
-#define GRID_SEQ_URI PLUGIN_URI "#"
-#define GRID_TOGGLE_URI GRID_SEQ_URI "gridToggle"
-
 typedef struct {
-    Display* display;
-    Window window;
+    GtkWidget* window;
+    GtkWidget* vbox;
+    GtkWidget* menu_bar;
+    GtkWidget* drawing_area;
+    GtkWidget* settings_dialog;
+    GtkWidget* length_scale;
+    GtkWidget* length_label;
+
     cairo_surface_t* surface;
-    cairo_t* cr;
 
     LV2UI_Write_Function write_function;
     LV2UI_Controller controller;
@@ -51,46 +60,247 @@ typedef struct {
     GridSeqState state;
 
     int cell_size;
-    int idle_counter;
-    bool mapped;
-    bool first_idle;
-    Atom wm_delete_window;
-
-    LaunchpadController* launchpad;
     uint8_t prev_step;
     float prev_grid_changed;
+    uint8_t pending_length;  // Slider value before Apply
+    bool needs_redraw;  // Flag to force immediate redraw
 
     // URIDs for atom messages
     LV2_URID_Map* map;
     LV2_URID gridState;
-    LV2_URID cellX;
-    LV2_URID cellY;
-    LV2_URID cellValue;
-    LV2_URID atom_Int;
     LV2_URID atom_eventTransfer;
 
     // Port subscription
     const LV2UI_Port_Subscribe* port_subscribe;
 } GridSeqUI;
 
-static void draw_grid(GridSeqUI* ui) {
-    cairo_t* cr = ui->cr;
+// Settings dialog - apply button clicked
+static void on_settings_apply(GtkWidget* button, gpointer data) {
+    GridSeqUI* ui = (GridSeqUI*)data;
+    (void)button;
+
+    // Write new length to plugin port
+    float length_value = (float)ui->pending_length;
+    ui->write_function(ui->controller, 24, sizeof(float), 0, &length_value);  // PORT_SEQUENCE_LENGTH = 24
+
+    // Close dialog
+    gtk_widget_destroy(ui->settings_dialog);
+    ui->settings_dialog = NULL;
+}
+
+// Settings dialog - cancel button clicked
+static void on_settings_cancel(GtkWidget* button, gpointer data) {
+    GridSeqUI* ui = (GridSeqUI*)data;
+    (void)button;
+
+    // Close dialog without applying
+    gtk_widget_destroy(ui->settings_dialog);
+    ui->settings_dialog = NULL;
+}
+
+// Length slider value changed
+static void on_length_changed(GtkRange* range, gpointer data) {
+    GridSeqUI* ui = (GridSeqUI*)data;
+
+    ui->pending_length = (uint8_t)gtk_range_get_value(range);
+
+    // Update label
+    char label_text[32];
+    snprintf(label_text, sizeof(label_text), "Length: %d steps", ui->pending_length);
+    gtk_label_set_text(GTK_LABEL(ui->length_label), label_text);
+}
+
+// Open settings dialog
+static void on_settings_activate(GtkMenuItem* item, gpointer data) {
+    GridSeqUI* ui = (GridSeqUI*)data;
+    (void)item;
+
+    // Don't open multiple dialogs
+    if (ui->settings_dialog) return;
+
+    // Create dialog (no parent window in embedded UI)
+    ui->settings_dialog = gtk_dialog_new();
+    gtk_window_set_title(GTK_WINDOW(ui->settings_dialog), "Settings");
+    gtk_window_set_modal(GTK_WINDOW(ui->settings_dialog), TRUE);
+    gtk_window_set_default_size(GTK_WINDOW(ui->settings_dialog), 400, 150);
+
+    // Get content area
+    GtkWidget* content_area = gtk_dialog_get_content_area(GTK_DIALOG(ui->settings_dialog));
+    gtk_container_set_border_width(GTK_CONTAINER(content_area), 12);
+
+    // Create vbox for content
+    GtkWidget* vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
+    gtk_container_add(GTK_CONTAINER(content_area), vbox);
+
+    // Label
+    ui->length_label = gtk_label_new(NULL);
+    char label_text[32];
+    snprintf(label_text, sizeof(label_text), "Length: %d steps", ui->state.sequence_length);
+    gtk_label_set_text(GTK_LABEL(ui->length_label), label_text);
+    gtk_box_pack_start(GTK_BOX(vbox), ui->length_label, FALSE, FALSE, 0);
+
+    // Slider
+    ui->length_scale = gtk_scale_new_with_range(GTK_ORIENTATION_HORIZONTAL,
+                                                  MIN_SEQUENCE_LENGTH,
+                                                  MAX_SEQUENCE_LENGTH,
+                                                  1.0);
+    gtk_range_set_value(GTK_RANGE(ui->length_scale), ui->state.sequence_length);
+    gtk_scale_set_digits(GTK_SCALE(ui->length_scale), 0);
+    gtk_scale_set_value_pos(GTK_SCALE(ui->length_scale), GTK_POS_RIGHT);
+    gtk_box_pack_start(GTK_BOX(vbox), ui->length_scale, FALSE, FALSE, 0);
+
+    ui->pending_length = ui->state.sequence_length;
+    g_signal_connect(ui->length_scale, "value-changed", G_CALLBACK(on_length_changed), ui);
+
+    // Button box
+    GtkWidget* button_box = gtk_button_box_new(GTK_ORIENTATION_HORIZONTAL);
+    gtk_button_box_set_layout(GTK_BUTTON_BOX(button_box), GTK_BUTTONBOX_END);
+    gtk_box_set_spacing(GTK_BOX(button_box), 6);
+    gtk_box_pack_start(GTK_BOX(vbox), button_box, FALSE, FALSE, 0);
+
+    // Cancel button
+    GtkWidget* cancel_button = gtk_button_new_with_label("Cancel");
+    g_signal_connect(cancel_button, "clicked", G_CALLBACK(on_settings_cancel), ui);
+    gtk_container_add(GTK_CONTAINER(button_box), cancel_button);
+
+    // OK button
+    GtkWidget* ok_button = gtk_button_new_with_label("OK");
+    g_signal_connect(ok_button, "clicked", G_CALLBACK(on_settings_apply), ui);
+    gtk_container_add(GTK_CONTAINER(button_box), ok_button);
+
+    gtk_widget_show_all(ui->settings_dialog);
+}
+
+// Mouse button press on drawing area
+static gboolean on_button_press(GtkWidget* widget, GdkEventButton* event, gpointer data) {
+    GridSeqUI* ui = (GridSeqUI*)data;
+    (void)widget;
+
+    fprintf(stderr, "grid-seq: Button press event received at (%f, %f)\n", event->x, event->y);
+
+    if (event->button != 1) return FALSE;  // Only left button
+
+    int mx = (int)event->x;
+    int my = (int)event->y;
+
+    // Get widget allocation for button position
+    GtkAllocation alloc;
+    gtk_widget_get_allocation(widget, &alloc);
+
+    // Check if settings button was clicked (top-right corner)
+    int button_size = 30;
+    int settings_x = alloc.width - button_size - 10;
+    int settings_y = 10;
+
+    if (mx >= settings_x && mx <= settings_x + button_size &&
+        my >= settings_y && my <= settings_y + button_size) {
+        // Settings button clicked - open dialog
+        on_settings_activate(NULL, ui);
+        return TRUE;
+    }
+
+    // Check if reset button was clicked (next to settings)
+    int reset_x = settings_x - button_size - 5;
+    int reset_y = 10;
+
+    if (mx >= reset_x && mx <= reset_x + button_size &&
+        my >= reset_y && my <= reset_y + button_size) {
+        // Reset button clicked - send hardware reset command
+        fprintf(stderr, "grid-seq: Hardware reset button clicked!\n");
+
+        // Send a reset trigger to the plugin via a control port
+        // We'll use PORT_GRID_X with a special value (-100) to indicate reset
+        float reset_signal = -100.0f;
+        ui->write_function(ui->controller, 3, sizeof(float), 0, &reset_signal);
+
+        fprintf(stderr, "grid-seq: Sent hardware reset signal to plugin\n");
+        return TRUE;
+    }
+
+    // Check if query button was clicked (next to reset)
+    int query_x = reset_x - button_size - 5;
+    int query_y = 10;
+
+    if (mx >= query_x && mx <= query_x + button_size &&
+        my >= query_y && my <= query_y + button_size) {
+        // Query button clicked - just send device inquiry
+        fprintf(stderr, "grid-seq: Query button clicked!\n");
+
+        // Send a query trigger to the plugin via a control port
+        // We'll use PORT_GRID_X with a special value (-200) to indicate query
+        float query_signal = -200.0f;
+        ui->write_function(ui->controller, 3, sizeof(float), 0, &query_signal);
+
+        fprintf(stderr, "grid-seq: Sent device query signal to plugin\n");
+        return TRUE;
+    }
+
+    // Calculate which grid cell was clicked
+    int x = (mx - GRID_MARGIN) / (ui->cell_size + GRID_SPACING);
+    int y = (my - GRID_MARGIN) / (ui->cell_size + GRID_SPACING);
+
+    if (x >= 0 && x < ui->state.sequence_length && y >= 0 && y < GRID_ROWS) {
+        // Flip Y coordinate (grid is drawn top to bottom)
+        int grid_y = GRID_ROWS - 1 - y;
+
+        // Toggle in local state for immediate visual feedback
+        state_toggle_step(&ui->state, x, grid_y);
+        ui->needs_redraw = true;  // Force immediate redraw
+
+        // Send to plugin via control ports
+        float fx = (float)x;
+        float fy = (float)grid_y;
+        ui->write_function(ui->controller, 3, sizeof(float), 0, &fx);  // PORT_GRID_X
+        ui->write_function(ui->controller, 4, sizeof(float), 0, &fy);  // PORT_GRID_Y
+
+        fprintf(stderr, "grid-seq: GUI toggled cell [%d,%d]\n", x, grid_y);
+    }
+
+    return TRUE;
+}
+
+// GTK3 draw callback
+static gboolean on_draw(GtkWidget* widget, cairo_t* cr, gpointer data) {
+    GridSeqUI* ui = (GridSeqUI*)data;
+    (void)widget;
+
+    if (!cr) {
+        fprintf(stderr, "grid-seq: draw callback - no cairo context!\n");
+        return FALSE;
+    }
+
+    // Get actual widget size
+    GtkAllocation alloc;
+    gtk_widget_get_allocation(widget, &alloc);
+
+    static gboolean first_draw = TRUE;
+    if (first_draw) {
+        fprintf(stderr, "grid-seq: drawing area actual size: %dx%d\n", alloc.width, alloc.height);
+        first_draw = FALSE;
+    }
 
     // Clear background
     cairo_set_source_rgb(cr, 0.1, 0.1, 0.1);
     cairo_paint(cr);
 
-    int grid_width = WINDOW_WIDTH - 2 * GRID_MARGIN;
-    ui->cell_size = (grid_width - (GRID_SIZE - 1) * GRID_SPACING) / GRID_SIZE;
+    // Calculate cell size based on actual widget size and sequence length
+    int grid_width = alloc.width - 2 * GRID_MARGIN;
+    int grid_height = alloc.height - 2 * GRID_MARGIN;
+    int num_cols = ui->state.sequence_length;
 
-    // Draw grid cells
-    for (int x = 0; x < GRID_SIZE; x++) {
-        for (int y = 0; y < GRID_SIZE; y++) {
+    // Calculate cell size to fit both dimensions
+    int cell_width = (grid_width - (num_cols - 1) * GRID_SPACING) / num_cols;
+    int cell_height = (grid_height - (GRID_ROWS - 1) * GRID_SPACING) / GRID_ROWS;
+    ui->cell_size = (cell_width < cell_height) ? cell_width : cell_height;
+
+    // Draw grid cells - use sequence_length for columns
+    for (int x = 0; x < num_cols; x++) {
+        for (int y = 0; y < GRID_ROWS; y++) {
             int px = GRID_MARGIN + x * (ui->cell_size + GRID_SPACING);
             int py = GRID_MARGIN + y * (ui->cell_size + GRID_SPACING);
 
-            // Check if this step is active
-            bool is_active = ui->state.grid[x][GRID_SIZE - 1 - y];
+            // Check if this step is active (flip Y for bottom-to-top display)
+            bool is_active = ui->state.grid[x][GRID_ROWS - 1 - y];
 
             // Check if this is the current step
             bool is_current = (x == ui->state.current_step);
@@ -119,9 +329,59 @@ static void draw_grid(GridSeqUI* ui) {
         }
     }
 
-    // Flush to display
-    cairo_surface_flush(ui->surface);
-    XFlush(ui->display);
+    // Draw settings button in top-right corner
+    int button_size = 30;
+    int settings_x = alloc.width - button_size - 10;
+    int settings_y = 10;
+
+    // Settings button background
+    cairo_set_source_rgb(cr, 0.3, 0.3, 0.3);
+    cairo_rectangle(cr, settings_x, settings_y, button_size, button_size);
+    cairo_fill(cr);
+
+    // Draw reset button (next to settings)
+    int reset_x = settings_x - button_size - 5;
+    int reset_y = 10;
+
+    // Reset button background (different color - red)
+    cairo_set_source_rgb(cr, 0.5, 0.2, 0.2);
+    cairo_rectangle(cr, reset_x, reset_y, button_size, button_size);
+    cairo_fill(cr);
+
+    // Draw query button (next to reset)
+    int query_x = reset_x - button_size - 5;
+    int query_y = 10;
+
+    // Query button background (different color - blue)
+    cairo_set_source_rgb(cr, 0.2, 0.2, 0.5);
+    cairo_rectangle(cr, query_x, query_y, button_size, button_size);
+    cairo_fill(cr);
+
+    // Draw gear icon on settings button
+    cairo_set_source_rgb(cr, 0.8, 0.8, 0.8);
+    cairo_set_line_width(cr, 2);
+    int settings_center_x = settings_x + button_size / 2;
+    int settings_center_y = settings_y + button_size / 2;
+    cairo_arc(cr, settings_center_x, settings_center_y, 8, 0, 2 * M_PI);
+    cairo_stroke(cr);
+
+    // Draw "R" text on reset button
+    cairo_set_source_rgb(cr, 1.0, 0.6, 0.6);
+    cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_BOLD);
+    cairo_set_font_size(cr, 18);
+    int reset_center_x = reset_x + button_size / 2;
+    int reset_center_y = reset_y + button_size / 2;
+    cairo_move_to(cr, reset_center_x - 6, reset_center_y + 6);
+    cairo_show_text(cr, "R");
+
+    // Draw "?" text on query button
+    cairo_set_source_rgb(cr, 0.6, 0.6, 1.0);
+    int query_center_x = query_x + button_size / 2;
+    int query_center_y = query_y + button_size / 2;
+    cairo_move_to(cr, query_center_x - 5, query_center_y + 6);
+    cairo_show_text(cr, "?");
+
+    return FALSE;
 }
 
 static LV2UI_Handle instantiate(
@@ -162,99 +422,60 @@ static LV2UI_Handle instantiate(
 
     // Map URIDs
     ui->gridState = ui->map->map(ui->map->handle, GRID_SEQ__gridState);
-    ui->cellX = ui->map->map(ui->map->handle, GRID_SEQ__cellX);
-    ui->cellY = ui->map->map(ui->map->handle, GRID_SEQ__cellY);
-    ui->cellValue = ui->map->map(ui->map->handle, GRID_SEQ__cellValue);
-    ui->atom_Int = ui->map->map(ui->map->handle, LV2_ATOM__Int);
     ui->atom_eventTransfer = ui->map->map(ui->map->handle, LV2_ATOM__eventTransfer);
 
     // Initialize state
     state_init(&ui->state, 48000.0);
 
-    // Load test pattern (same as plugin)
-    state_toggle_step(&ui->state, 0, 0);
-    state_toggle_step(&ui->state, 1, 2);
-    state_toggle_step(&ui->state, 2, 4);
-    state_toggle_step(&ui->state, 3, 5);
-    state_toggle_step(&ui->state, 4, 7);
-
-    // Create X11 window
-    ui->display = XOpenDisplay(NULL);
-    if (!ui->display) {
-        free(ui);
-        return NULL;
-    }
-
-    int screen = DefaultScreen(ui->display);
-    ui->window = XCreateSimpleWindow(
-        ui->display,
-        RootWindow(ui->display, screen),
-        0, 0, WINDOW_WIDTH, WINDOW_HEIGHT, 1,
-        BlackPixel(ui->display, screen),
-        BlackPixel(ui->display, screen)
-    );
-
-    // Don't let window manager close the window (would kill host)
-    ui->wm_delete_window = XInternAtom(ui->display, "WM_DELETE_WINDOW", False);
-    XSetWMProtocols(ui->display, ui->window, &ui->wm_delete_window, 1);
-
-    // Set window to not accept keyboard focus (prevents blocking DAW shortcuts)
-    XWMHints hints;
-    hints.flags = InputHint;
-    hints.input = False;
-    XSetWMHints(ui->display, ui->window, &hints);
-
-    XSelectInput(ui->display, ui->window,
-                 ExposureMask | ButtonPressMask | StructureNotifyMask);
-
-    // Map the window FIRST
-    XMapWindow(ui->display, ui->window);
-
-    // Wait for window to be viewable
-    XWindowAttributes attrs;
-    int attempts = 0;
-    while (attempts++ < 100) {
-        XGetWindowAttributes(ui->display, ui->window, &attrs);
-        if (attrs.map_state == IsViewable) break;
-        XSync(ui->display, False);
-    }
-
-    // Now create Cairo surface
-    ui->surface = cairo_xlib_surface_create(
-        ui->display, ui->window,
-        DefaultVisual(ui->display, screen),
-        WINDOW_WIDTH, WINDOW_HEIGHT
-    );
-
-    ui->cr = cairo_create(ui->surface);
-
-    // Initialize state
-    ui->idle_counter = 0;
-    ui->mapped = true;
-    ui->first_idle = true;
-
-    // Force initial draw
-    draw_grid(ui);
-    XFlush(ui->display);
-
-    // Don't initialize Launchpad here - it's handled by the plugin via MIDI routing
-    // This prevents conflicts and ghost LED events
-    ui->launchpad = NULL;
-
     ui->prev_step = 0;
     ui->prev_grid_changed = 0.0f;
+    ui->settings_dialog = NULL;
+    ui->needs_redraw = true;
 
-    // Subscribe to notify port to receive grid state updates
+    // Create a regular toplevel window - Reaper will reparent it
+    ui->window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
+    gtk_window_set_title(GTK_WINDOW(ui->window), "Grid Sequencer");
+    gtk_window_set_default_size(GTK_WINDOW(ui->window), WINDOW_WIDTH, WINDOW_HEIGHT);
+    gtk_window_set_resizable(GTK_WINDOW(ui->window), FALSE);
+
+    // Don't accept keyboard focus to avoid blocking host shortcuts
+    gtk_window_set_accept_focus(GTK_WINDOW(ui->window), FALSE);
+
+    fprintf(stderr, "grid-seq: Created toplevel window\n");
+
+    // Create vbox as main container
+    ui->vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    gtk_container_add(GTK_CONTAINER(ui->window), ui->vbox);
+
+    // GTK menu bar doesn't render in X11 embedding
+    // TODO: Consider migrating to robtk for proper widget support
+    // For now, draw settings button with Cairo
+    ui->menu_bar = NULL;
+
+    // Create drawing area for grid (full window since no menu)
+    ui->drawing_area = gtk_drawing_area_new();
+    gtk_widget_set_size_request(ui->drawing_area, WINDOW_WIDTH, WINDOW_HEIGHT);
+    gtk_box_pack_start(GTK_BOX(ui->vbox), ui->drawing_area, TRUE, TRUE, 0);
+
+    // Enable button press events - add ALL_EVENTS_MASK to ensure events are captured
+    gtk_widget_add_events(ui->drawing_area, GDK_ALL_EVENTS_MASK);
+
+    // Drawing area needs a GdkWindow to receive events - request it explicitly
+    gtk_widget_set_can_focus(ui->drawing_area, TRUE);
+    gtk_widget_set_has_window(ui->drawing_area, TRUE);
+
+    // Connect drawing area signals
+    fprintf(stderr, "grid-seq: connecting draw signal to drawing_area %p\n", (void*)ui->drawing_area);
+    g_signal_connect(ui->drawing_area, "draw", G_CALLBACK(on_draw), ui);
+    g_signal_connect(ui->drawing_area, "button-press-event", G_CALLBACK(on_button_press), ui);
+
+    // Also try connecting to the window itself
+    g_signal_connect(ui->window, "button-press-event", G_CALLBACK(on_button_press), ui);
+
+    // Subscribe to ports
     if (ui->port_subscribe) {
-        ui->port_subscribe->subscribe(
-            ui->port_subscribe->handle,
-            7,  // PORT_NOTIFY
-            ui->atom_eventTransfer,
-            NULL
-        );
-
-        // Subscribe to grid row ports (8-15)
-        for (uint32_t i = 8; i <= 15; i++) {
+        // Subscribe to grid row ports (0-15)
+        for (uint32_t i = 8; i <= 23; i++) {
             ui->port_subscribe->subscribe(
                 ui->port_subscribe->handle,
                 i,
@@ -262,10 +483,40 @@ static LV2UI_Handle instantiate(
                 NULL
             );
         }
+
+        // Subscribe to sequence_length port
+        ui->port_subscribe->subscribe(
+            ui->port_subscribe->handle,
+            24,  // PORT_SEQUENCE_LENGTH
+            0,   // Control port protocol
+            NULL
+        );
     }
 
-    // Return the X11 window as the widget
-    *widget = (LV2UI_Widget)(unsigned long)ui->window;
+    // Realize and show the window
+    gtk_widget_realize(ui->window);
+    gtk_widget_show_all(ui->window);
+
+    // Get X11 window ID
+    GdkWindow* gdk_window = gtk_widget_get_window(ui->window);
+    if (gdk_window) {
+        Window xid = gdk_x11_window_get_xid(gdk_window);
+        *widget = (LV2UI_Widget)(uintptr_t)xid;
+
+        // Check if window is actually visible
+        GdkWindowState state = gdk_window_get_state(gdk_window);
+        gboolean is_viewable = gdk_window_is_viewable(gdk_window);
+        gboolean is_visible = gdk_window_is_visible(gdk_window);
+
+        fprintf(stderr, "grid-seq: Returning X11 window ID: 0x%lx (viewable=%d, visible=%d, state=%d)\n",
+                xid, is_viewable, is_visible, state);
+    } else {
+        fprintf(stderr, "grid-seq: ERROR - failed to get GdkWindow!\n");
+        *widget = 0;
+    }
+
+    fprintf(stderr, "grid-seq: UI instantiated, drawing area realized=%d\n",
+            gtk_widget_get_realized(ui->drawing_area));
 
     return (LV2UI_Handle)ui;
 }
@@ -273,17 +524,10 @@ static LV2UI_Handle instantiate(
 static void cleanup(LV2UI_Handle handle) {
     GridSeqUI* ui = (GridSeqUI*)handle;
 
-    // Unsubscribe from notify port
+    // Unsubscribe from ports
     if (ui->port_subscribe) {
-        ui->port_subscribe->unsubscribe(
-            ui->port_subscribe->handle,
-            7,  // PORT_NOTIFY
-            ui->atom_eventTransfer,
-            NULL
-        );
-
-        // Unsubscribe from grid row ports (8-15)
-        for (uint32_t i = 8; i <= 15; i++) {
+        // Unsubscribe from grid row ports (8-23)
+        for (uint32_t i = 8; i <= 23; i++) {
             ui->port_subscribe->unsubscribe(
                 ui->port_subscribe->handle,
                 i,
@@ -291,17 +535,19 @@ static void cleanup(LV2UI_Handle handle) {
                 NULL
             );
         }
+
+        // Unsubscribe from sequence_length port
+        ui->port_subscribe->unsubscribe(
+            ui->port_subscribe->handle,
+            24,
+            0,
+            NULL
+        );
     }
 
-    if (ui->launchpad) {
-        launchpad_cleanup(ui->launchpad);
-    }
-
-    if (ui->cr) cairo_destroy(ui->cr);
-    if (ui->surface) cairo_surface_destroy(ui->surface);
-    if (ui->display) {
-        if (ui->window) XDestroyWindow(ui->display, ui->window);
-        XCloseDisplay(ui->display);
+    // Destroy window and all child widgets
+    if (ui->window) {
+        gtk_widget_destroy(ui->window);
     }
 
     free(ui);
@@ -316,147 +562,79 @@ static void port_event(
 ) {
     GridSeqUI* ui = (GridSeqUI*)handle;
 
-    // Handle atom messages (notify port)
-    if (port_index == 7) {
-        if (format == ui->atom_eventTransfer) {
-            const LV2_Atom_Sequence* seq = (const LV2_Atom_Sequence*)buffer;
-
-            LV2_ATOM_SEQUENCE_FOREACH(seq, ev) {
-                // Check if it's our gridState atom (full grid data)
-                if (ev->body.type == ui->gridState && ev->body.size == 64) {
-                    const uint8_t* grid_data = (const uint8_t*)(&ev->body + 1);
-
-                    // Copy grid data
-                    for (int x = 0; x < 8; x++) {
-                        for (int y = 0; y < 8; y++) {
-                            ui->state.grid[x][y] = (grid_data[x * 8 + y] != 0);
-                        }
-                    }
-
-                    // Redraw
-                    draw_grid(ui);
-                }
-            }
-        }
-    }
-
     (void)buffer_size;
+    (void)format;
 
     // Handle current step updates from plugin
     if (port_index == 5 && buffer) {  // PORT_CURRENT_STEP
         float step = *(const float*)buffer;
-        if (step >= 0 && step < GRID_SIZE) {
+        if (step >= 0 && step < MAX_GRID_SIZE) {
             ui->state.current_step = (uint8_t)step;
-
-            // Update Launchpad LEDs if current step changed
-            if (ui->launchpad && ui->state.current_step != ui->prev_step) {
-                launchpad_update_grid(ui->launchpad, &ui->state);
-                ui->prev_step = ui->state.current_step;
-            }
+            ui->needs_redraw = true;  // Force immediate redraw
         }
     }
 
-    // Handle grid changed counter from plugin
-    if (port_index == 6 && buffer) {  // PORT_GRID_CHANGED
-        float grid_changed = *(const float*)buffer;
-
-        if (grid_changed != ui->prev_grid_changed) {
-            ui->prev_grid_changed = grid_changed;
+    // Handle sequence length changes
+    if (port_index == 24 && buffer) {  // PORT_SEQUENCE_LENGTH
+        float length = *(const float*)buffer;
+        uint8_t new_length = (uint8_t)length;
+        if (new_length >= MIN_SEQUENCE_LENGTH && new_length <= MAX_SEQUENCE_LENGTH) {
+            ui->state.sequence_length = new_length;
+            ui->needs_redraw = true;  // Force immediate redraw
         }
     }
 
-    // Handle grid row ports (8-15)
-    if (port_index >= 8 && port_index <= 15 && buffer) {
+    // Handle grid row ports (8-23) - all 16 rows
+    if (port_index >= 8 && port_index <= 23 && buffer) {
         int x = port_index - 8;
         uint8_t row_value = (uint8_t)(*(const float*)buffer);
 
         // Unpack bits into grid
-        for (int y = 0; y < GRID_SIZE; y++) {
+        for (int y = 0; y < GRID_ROWS; y++) {
             ui->state.grid[x][y] = (row_value & (1 << y)) != 0;
         }
 
-        // Redraw after receiving grid data
-        draw_grid(ui);
+        ui->needs_redraw = true;  // Force immediate redraw
     }
 }
 
 static int idle(LV2UI_Handle handle) {
     GridSeqUI* ui = (GridSeqUI*)handle;
 
-    // Force draw on first few idle calls to ensure startup rendering
-    static int draw_count = 0;
-    if (ui->first_idle) {
-        draw_grid(ui);
-        if (++draw_count > 3) {
-            ui->first_idle = false;
-        }
+    // Process pending GTK events
+    while (gtk_events_pending()) {
+        gtk_main_iteration();
     }
 
-    XEvent event;
-    while (XPending(ui->display)) {
-        XNextEvent(ui->display, &event);
+    // Redraw when state changes or at 30fps
+    static int frame_count = 0;
+    static bool first_idle = true;
+    frame_count++;
 
-        switch (event.type) {
-            case Expose:
-                draw_grid(ui);
-                break;
+    bool should_draw = ui->needs_redraw || (frame_count % 30 == 0);
 
-            case ClientMessage:
-                // Handle window close request
-                if ((Atom)event.xclient.data.l[0] == ui->wm_delete_window) {
-                    // Don't close - just hide (host will handle cleanup)
-                    XUnmapWindow(ui->display, ui->window);
+    if (should_draw) {
+        // Force redraw of entire window (including menu) on first idle
+        if (first_idle && ui->window && gtk_widget_get_realized(ui->window)) {
+            GdkWindow* window_gdk = gtk_widget_get_window(ui->window);
+            if (window_gdk) {
+                gdk_window_invalidate_rect(window_gdk, NULL, TRUE);
+            }
+            first_idle = false;
+        }
+
+        // Draw the grid
+        if (ui->drawing_area && gtk_widget_get_realized(ui->drawing_area)) {
+            GdkWindow* gdk_win = gtk_widget_get_window(ui->drawing_area);
+            if (gdk_win) {
+                cairo_t* cr = gdk_cairo_create(gdk_win);
+                if (cr) {
+                    on_draw(ui->drawing_area, cr, ui);
+                    cairo_destroy(cr);
+                    ui->needs_redraw = false;  // Clear flag after drawing
                 }
-                break;
-
-            case ButtonPress: {
-                int mx = event.xbutton.x;
-                int my = event.xbutton.y;
-
-                // Calculate which cell was clicked
-                int x = (mx - GRID_MARGIN) / (ui->cell_size + GRID_SPACING);
-                int y = (my - GRID_MARGIN) / (ui->cell_size + GRID_SPACING);
-
-                if (x >= 0 && x < GRID_SIZE && y >= 0 && y < GRID_SIZE) {
-                    // Flip Y coordinate (grid is drawn top to bottom)
-                    int grid_y = GRID_SIZE - 1 - y;
-
-                    // Toggle in local state for immediate visual feedback
-                    state_toggle_step(&ui->state, x, grid_y);
-                    draw_grid(ui);
-
-                    // Send to plugin via control ports (plugin handles Launchpad LEDs)
-                    // The plugin will echo this back, but we've already updated locally
-                    float fx = (float)x;
-                    float fy = (float)grid_y;
-                    ui->write_function(ui->controller, 3, sizeof(float), 0, &fx);
-                    ui->write_function(ui->controller, 4, sizeof(float), 0, &fy);
-
-                    // Also listen for changes from the plugin (Launchpad button presses)
-                    // by monitoring grid_changed counter and re-syncing periodically
-                }
-                break;
             }
         }
-    }
-
-    // Poll Launchpad for button presses
-    // Note: Currently disabled because Launchpad is routed through plugin MIDI input
-    // The plugin receives button presses and updates its state, but GUI needs sync
-    // This will be handled via the grid_changed port mechanism
-    /*
-    if (ui->launchpad) {
-        if (launchpad_poll_input(ui->launchpad, &ui->state)) {
-            draw_grid(ui);
-            launchpad_update_grid(ui->launchpad, &ui->state);
-        }
-    }
-    */
-
-    // Redraw periodically to update current step indicator
-    if (++ui->idle_counter > 5) {
-        draw_grid(ui);
-        ui->idle_counter = 0;
     }
 
     return 0;
@@ -464,17 +642,24 @@ static int idle(LV2UI_Handle handle) {
 
 static int show(LV2UI_Handle handle) {
     GridSeqUI* ui = (GridSeqUI*)handle;
+    fprintf(stderr, "grid-seq: show() called\n");
 
-    // Force initial draw when shown
-    XClearArea(ui->display, ui->window, 0, 0, 0, 0, True);
-    XFlush(ui->display);
-    draw_grid(ui);
+    gtk_widget_show_all(ui->window);
+
+    // Force a redraw after showing
+    gtk_widget_queue_draw(ui->drawing_area);
+
+    // Process pending events
+    while (gtk_events_pending()) {
+        gtk_main_iteration();
+    }
 
     return 0;
 }
 
 static int hide(LV2UI_Handle handle) {
-    (void)handle;
+    GridSeqUI* ui = (GridSeqUI*)handle;
+    gtk_widget_hide(ui->window);
     return 0;
 }
 

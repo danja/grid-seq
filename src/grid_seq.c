@@ -299,6 +299,15 @@ static void send_launchpad_led(GridSeq* gs, LV2_Atom_Forge* forge, uint8_t note,
     lv2_atom_forge_write(forge, msg, 3);
 }
 
+static void send_launchpad_cc_led(GridSeq* gs, LV2_Atom_Forge* forge, uint8_t cc, uint8_t color) {
+    // Send CC LED commands for control buttons (arrows, etc.)
+    uint8_t msg[3] = {0xB0, cc, color};
+
+    lv2_atom_forge_frame_time(forge, 0);
+    lv2_atom_forge_atom(forge, 3, gs->midi_MidiEvent);
+    lv2_atom_forge_write(forge, msg, 3);
+}
+
 static void update_launchpad_leds(GridSeq* gs, LV2_Atom_Forge* forge) {
     // Calculate which steps to show based on current hardware page
     uint8_t page_offset = gs->state.hardware_page * 8;
@@ -325,6 +334,15 @@ static void update_launchpad_leds(GridSeq* gs, LV2_Atom_Forge* forge) {
             send_launchpad_led(gs, forge, note, color);
         }
     }
+
+    // Light up arrow buttons based on current page and sequence length
+    // Left arrow (CC 93) - only lit if we can go left
+    uint8_t left_color = (gs->state.hardware_page > 0) ? LP_COLOR_WHITE : LP_COLOR_OFF;
+    send_launchpad_cc_led(gs, forge, 93, left_color);
+
+    // Right arrow (CC 94) - only lit if sequence length > 8 and we can go right
+    uint8_t right_color = (gs->state.sequence_length > 8 && gs->state.hardware_page == 0) ? LP_COLOR_WHITE : LP_COLOR_OFF;
+    send_launchpad_cc_led(gs, forge, 94, right_color);
 }
 
 static void activate(LV2_Handle instance) {
@@ -439,38 +457,32 @@ static void run(LV2_Handle instance, uint32_t n_samples) {
                 uint8_t cc = msg[1];
                 uint8_t value = msg[2];
 
+                // Debug: Log ALL CC messages to discover arrow button CCs
+                static int cc_log_count = 0;
+                if (cc_log_count < 50 || (cc >= 80 && cc <= 100)) {  // Log first 50 or arrows range
+                    fprintf(stderr, "grid-seq: Launchpad CC received - CC=%d value=%d\n", cc, value);
+                    cc_log_count++;
+                }
+
                 // Handle arrow buttons and top row for sequence length
                 if (value > 0) {
-                    if (cc == 91 && !gs->state.playing) {  // Left arrow (CC 91)
+                    if (cc == 93) {  // Left arrow (CC 93)
                         if (gs->state.hardware_page > 0) {
                             gs->state.hardware_page--;
                             gs->grid_dirty = true;
-                            fprintf(stderr, "grid-seq: Switched to page 0 (steps 0-7)\n");
+                            fprintf(stderr, "grid-seq: Left arrow - switched to page 0 (steps 0-7)\n");
                         }
                     }
-                    else if (cc == 92 && !gs->state.playing) {  // Right arrow (CC 92)
+                    else if (cc == 94) {  // Right arrow (CC 94)
                         // Only switch to page 1 if sequence length > 8
                         if (gs->state.sequence_length > 8 && gs->state.hardware_page == 0) {
                             gs->state.hardware_page = 1;
                             gs->grid_dirty = true;
-                            fprintf(stderr, "grid-seq: Switched to page 1 (steps 8-15)\n");
+                            fprintf(stderr, "grid-seq: Right arrow - switched to page 1 (steps 8-15)\n");
                         }
                     }
-                    // Top row buttons (CC 91-98) set sequence length 2-16
-                    // CC 91 is left arrow, so use 93-98 for length 8-16
-                    else if (cc >= 93 && cc <= 98) {
-                        uint8_t new_length = (cc - 93) + 8;  // 93->8, 94->9, ..., 98->13
-                        if (new_length != gs->state.sequence_length) {
-                            gs->state.sequence_length = new_length;
-                            fprintf(stderr, "grid-seq: Sequence length changed to %d steps\n", new_length);
-                            gs->grid_dirty = true;
-
-                            // Reset to page 0 if on page 1 and length is now <= 8
-                            if (gs->state.hardware_page > 0 && new_length <= 8) {
-                                gs->state.hardware_page = 0;
-                            }
-                        }
-                    }
+                    // Top row buttons could be used for other functions if needed
+                    // CC 93/94 are arrows, so top row would be different CCs
                 }
             }
         }

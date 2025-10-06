@@ -183,7 +183,7 @@ static void draw_settings_dialog(GridSeqX11UI* ui) {
     cairo_show_text(cr, "MIDI Filter (Note-Ons Only):");
 
     // Draw checkbox
-    int checkbox_x = 250;
+    int checkbox_x = 310;
     int checkbox_y = 115;
     int checkbox_size = 20;
 
@@ -249,14 +249,14 @@ static void open_settings_dialog(GridSeqX11UI* ui) {
 
     ui->settings_window = XCreateWindow(
         ui->display, ui->window,
-        (WINDOW_WIDTH - 300) / 2, (WINDOW_HEIGHT - 220) / 2,
-        300, 220, 2,
+        (WINDOW_WIDTH - 360) / 2, (WINDOW_HEIGHT - 220) / 2,
+        360, 220, 2,
         CopyFromParent, InputOutput, CopyFromParent,
         CWBackPixel | CWEventMask | CWOverrideRedirect, &attrs
     );
 
     ui->settings_surface = cairo_xlib_surface_create(
-        ui->display, ui->settings_window, ui->visual, 300, 220
+        ui->display, ui->settings_window, ui->visual, 360, 220
     );
 
     XMapWindow(ui->display, ui->settings_window);
@@ -311,15 +311,22 @@ static void handle_settings_click(GridSeqX11UI* ui, int mx, int my) {
         if (pos < 0.0f) pos = 0.0f;
         if (pos > 1.0f) pos = 1.0f;
 
+        // Use rounding to ensure we can reach 16
         ui->pending_length = MIN_SEQUENCE_LENGTH +
-                            (uint8_t)(pos * (MAX_SEQUENCE_LENGTH - MIN_SEQUENCE_LENGTH));
+                            (uint8_t)(pos * (MAX_SEQUENCE_LENGTH - MIN_SEQUENCE_LENGTH) + 0.5f);
+
+        // Clamp to valid range
+        if (ui->pending_length > MAX_SEQUENCE_LENGTH) {
+            ui->pending_length = MAX_SEQUENCE_LENGTH;
+        }
+
         draw_settings_dialog(ui);
         XFlush(ui->display);
         return;
     }
 
     // Checkbox interaction
-    int checkbox_x = 250;
+    int checkbox_x = 310;
     int checkbox_y = 115;
     int checkbox_size = 20;
 

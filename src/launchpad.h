@@ -43,6 +43,7 @@ static const uint8_t LP_SCENE_CCS[] = {89, 79, 69, 59, 49, 39, 29, 19};
 
 // Color palette indices
 #define LP_COLOR_OFF 0
+#define LP_COLOR_WHITE 3
 #define LP_COLOR_GREEN 21
 #define LP_COLOR_GREEN_DIM 23
 #define LP_COLOR_YELLOW 13

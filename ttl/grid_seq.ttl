@@ -10,9 +10,10 @@
 <http://github.com/danny/grid-seq>
     a lv2:Plugin ,
         lv2:InstrumentPlugin ;
-    doap:name "Grid Sequencer" ;
+    doap:name "Grid Sequencer (Danny)" ;
     doap:license <https://opensource.org/licenses/ISC> ;
     lv2:project <http://github.com/danny/grid-seq> ;
+    lv2:category lv2:MIDIPlugin ;
     lv2:requiredFeature urid:map ;
     lv2:optionalFeature lv2:hardRTCapable ;
     ui:ui <http://github.com/danny/grid-seq#ui> ;
@@ -240,6 +241,16 @@
         lv2:minimum 2 ;
         lv2:maximum 16 ;
         lv2:portProperty lv2:integer
+    ] , [
+        a lv2:InputPort ,
+            lv2:ControlPort ;
+        lv2:index 25 ;
+        lv2:symbol "midi_filter" ;
+        lv2:name "MIDI Filter (Note-Ons Only)" ;
+        lv2:default 0 ;
+        lv2:minimum 0 ;
+        lv2:maximum 1 ;
+        lv2:portProperty lv2:toggled
     ] .
 
 <http://github.com/danny/grid-seq#ui>

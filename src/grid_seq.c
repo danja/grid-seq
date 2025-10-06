@@ -52,7 +52,8 @@ typedef enum {
     PORT_GRID_ROW_13 = 21,
     PORT_GRID_ROW_14 = 22,
     PORT_GRID_ROW_15 = 23,
-    PORT_SEQUENCE_LENGTH = 24
+    PORT_SEQUENCE_LENGTH = 24,
+    PORT_MIDI_FILTER = 25
 } PortIndex;
 
 typedef struct {
@@ -67,6 +68,7 @@ typedef struct {
     float* grid_changed;
     float* grid_row[MAX_GRID_SIZE];
     const float* sequence_length;
+    const float* midi_filter;
 
     // Features
     LV2_URID_Map* map;
@@ -232,6 +234,9 @@ static void connect_port(
             break;
         case PORT_SEQUENCE_LENGTH:
             gs->sequence_length = (const float*)data;
+            break;
+        case PORT_MIDI_FILTER:
+            gs->midi_filter = (const float*)data;
             break;
     }
 }
@@ -434,19 +439,36 @@ static void run(LV2_Handle instance, uint32_t n_samples) {
                 uint8_t cc = msg[1];
                 uint8_t value = msg[2];
 
-                // Only allow page switching when not playing
-                if (!gs->state.playing && value > 0) {
-                    if (cc == 91) {  // Left arrow (CC 91)
+                // Handle arrow buttons and top row for sequence length
+                if (value > 0) {
+                    if (cc == 91 && !gs->state.playing) {  // Left arrow (CC 91)
                         if (gs->state.hardware_page > 0) {
                             gs->state.hardware_page--;
                             gs->grid_dirty = true;
+                            fprintf(stderr, "grid-seq: Switched to page 0 (steps 0-7)\n");
                         }
                     }
-                    else if (cc == 92) {  // Right arrow (CC 92)
+                    else if (cc == 92 && !gs->state.playing) {  // Right arrow (CC 92)
                         // Only switch to page 1 if sequence length > 8
                         if (gs->state.sequence_length > 8 && gs->state.hardware_page == 0) {
                             gs->state.hardware_page = 1;
                             gs->grid_dirty = true;
+                            fprintf(stderr, "grid-seq: Switched to page 1 (steps 8-15)\n");
+                        }
+                    }
+                    // Top row buttons (CC 91-98) set sequence length 2-16
+                    // CC 91 is left arrow, so use 93-98 for length 8-16
+                    else if (cc >= 93 && cc <= 98) {
+                        uint8_t new_length = (cc - 93) + 8;  // 93->8, 94->9, ..., 98->13
+                        if (new_length != gs->state.sequence_length) {
+                            gs->state.sequence_length = new_length;
+                            fprintf(stderr, "grid-seq: Sequence length changed to %d steps\n", new_length);
+                            gs->grid_dirty = true;
+
+                            // Reset to page 0 if on page 1 and length is now <= 8
+                            if (gs->state.hardware_page > 0 && new_length <= 8) {
+                                gs->state.hardware_page = 0;
+                            }
                         }
                     }
                 }
@@ -614,7 +636,12 @@ static void run(LV2_Handle instance, uint32_t n_samples) {
         uint64_t half_point = (gs->state.frame_counter / gs->state.frames_per_step) * gs->state.frames_per_step
                              + (gs->state.frames_per_step / 2);
         uint32_t offset = (uint32_t)(half_point - old_frame);
-        sequencer_process_note_offs(&gs->state, &gs->forge, &gs->seq_uris, offset);
+
+        // Only send Note Offs if MIDI filter is disabled
+        bool filter_enabled = (gs->midi_filter && *gs->midi_filter > 0.5f);
+        if (!filter_enabled) {
+            sequencer_process_note_offs(&gs->state, &gs->forge, &gs->seq_uris, offset);
+        }
     }
 
     // End MIDI note sequence

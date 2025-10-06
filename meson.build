@@ -20,11 +20,10 @@ plugin_sources = [
   'src/launchpad.c',
 ]
 
-# UI sources
+# UI sources - raw X11 + Cairo (no GTK)
 ui_sources = [
-  'src/gui.c',
+  'src/gui_x11.c',
   'src/state.c',
-  'src/launchpad.c',
 ]
 
 # Build plugin shared library
@@ -37,11 +36,11 @@ shared_library('grid_seq',
   install_dir: get_option('libdir') / 'lv2' / 'grid-seq.lv2'
 )
 
-# Build UI shared library
+# Build UI shared library (X11 + Cairo only)
 shared_library('grid_seq_ui',
   ui_sources,
   include_directories: inc,
-  dependencies: [lv2_dep, cairo_dep, gtk3_dep, x11_dep],
+  dependencies: [lv2_dep, cairo_dep, x11_dep],
   name_prefix: '',
   install: true,
   install_dir: get_option('libdir') / 'lv2' / 'grid-seq.lv2'

@@ -43,6 +43,9 @@
 #define GRID_MARGIN 20
 #define GRID_SPACING 2
 
+// Forward declarations
+static gboolean on_button_press(GtkWidget* widget, GdkEventButton* event, gpointer data);
+
 typedef struct {
     GtkWidget* window;
     GtkWidget* vbox;
@@ -171,7 +174,7 @@ static void on_settings_activate(GtkMenuItem* item, gpointer data) {
     gtk_widget_show_all(ui->settings_dialog);
 }
 
-// Mouse button press on event box
+// Mouse button press handler
 static gboolean on_button_press(GtkWidget* widget, GdkEventButton* event, gpointer data) {
     GridSeqUI* ui = (GridSeqUI*)data;
 
@@ -409,18 +412,26 @@ static LV2UI_Handle instantiate(
     // Get required features
     ui->map = NULL;
     ui->port_subscribe = NULL;
+    void* parent = NULL;
 
     for (int i = 0; features[i]; i++) {
         if (strcmp(features[i]->URI, LV2_URID__map) == 0) {
             ui->map = (LV2_URID_Map*)features[i]->data;
         } else if (strcmp(features[i]->URI, LV2_UI__portSubscribe) == 0) {
             ui->port_subscribe = (const LV2UI_Port_Subscribe*)features[i]->data;
+        } else if (strcmp(features[i]->URI, LV2_UI__parent) == 0) {
+            parent = features[i]->data;
+            fprintf(stderr, "grid-seq: Got parent window from host: %p\n", parent);
         }
     }
 
     if (!ui->map) {
         free(ui);
         return NULL;
+    }
+
+    if (!parent) {
+        fprintf(stderr, "grid-seq: WARNING - No parent window provided by host\n");
     }
 
     // Map URIDs
@@ -435,16 +446,17 @@ static LV2UI_Handle instantiate(
     ui->settings_dialog = NULL;
     ui->needs_redraw = true;
 
-    // Create a regular toplevel window - Reaper will reparent it
+    // Create window - X11UI uses toplevel window that host will reparent
+    // Don't use GtkPlug - it expects a GtkSocket which Reaper doesn't provide
     ui->window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
     gtk_window_set_title(GTK_WINDOW(ui->window), "Grid Sequencer");
     gtk_window_set_default_size(GTK_WINDOW(ui->window), WINDOW_WIDTH, WINDOW_HEIGHT);
     gtk_window_set_resizable(GTK_WINDOW(ui->window), FALSE);
 
+    fprintf(stderr, "grid-seq: Created toplevel window (parent=%p will reparent)\n", parent);
+
     // Don't accept keyboard focus to avoid blocking host shortcuts
     gtk_window_set_accept_focus(GTK_WINDOW(ui->window), FALSE);
-
-    fprintf(stderr, "grid-seq: Created toplevel window\n");
 
     // Create vbox as main container
     ui->vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
@@ -472,8 +484,13 @@ static LV2UI_Handle instantiate(
     g_signal_connect(ui->drawing_area, "draw", G_CALLBACK(on_draw), ui);
 
     // Connect button-press to event box (for mouse clicks)
+    // Note: This may not work when embedded in Reaper - we poll X11 events directly in idle()
     g_signal_connect(event_box, "button-press-event", G_CALLBACK(on_button_press), ui);
     fprintf(stderr, "grid-seq: connected button-press-event to event_box\n");
+
+    // Also try connecting to the window itself
+    g_signal_connect(ui->window, "button-press-event", G_CALLBACK(on_button_press), ui);
+    gtk_widget_add_events(ui->window, GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK);
 
     // Subscribe to ports
     if (ui->port_subscribe) {
@@ -507,9 +524,16 @@ static LV2UI_Handle instantiate(
         *widget = (LV2UI_Widget)(uintptr_t)xid;
 
         // Enable X11 button press events directly
+        // Note: Reaper will reparent this window, so we need to re-enable events after embedding
         Display* display = GDK_WINDOW_XDISPLAY(gdk_window);
-        XSelectInput(display, xid, ButtonPressMask | ButtonReleaseMask);
-        fprintf(stderr, "grid-seq: Enabled X11 ButtonPress events on window 0x%lx\n", xid);
+
+        // Request ALL events including substructure notify (for reparenting detection)
+        XSelectInput(display, xid,
+                    ButtonPressMask | ButtonReleaseMask |
+                    PointerMotionMask |
+                    SubstructureNotifyMask);
+
+        fprintf(stderr, "grid-seq: Enabled X11 events on window 0x%lx\n", xid);
 
         // Check if window is actually visible
         GdkWindowState state = gdk_window_get_state(gdk_window);
@@ -614,18 +638,49 @@ static int idle(LV2UI_Handle handle) {
         gtk_main_iteration();
     }
 
-    // Check for X11 events directly (since GTK events are blocked by embedding)
+    // Poll X11 events directly like PUGL (GTK events blocked by Reaper embedding)
     if (ui->window && gtk_widget_get_realized(ui->window)) {
         GdkWindow* gdk_window = gtk_widget_get_window(ui->window);
         if (gdk_window) {
             Display* display = GDK_WINDOW_XDISPLAY(gdk_window);
             Window xwindow = GDK_WINDOW_XID(gdk_window);
+
+            // Flush and sync to ensure we see all events
+            XFlush(display);
+
             XEvent xevent;
 
-            while (XCheckWindowEvent(display, xwindow, ButtonPressMask, &xevent)) {
+            // Debug: Log if ANY events are pending (only first 10 times)
+            static int event_check_count = 0;
+            int pending = XPending(display);
+            if (event_check_count < 10) {
+                if (pending > 0 || event_check_count == 0) {
+                    fprintf(stderr, "grid-seq: XPending=%d events for display (check #%d)\n",
+                            pending, event_check_count);
+                }
+                event_check_count++;
+            }
+
+            // Poll all pending events like PUGL does
+            while (XPending(display) > 0) {
+                XNextEvent(display, &xevent);
+
+                // Debug: Log all events for our window (first 20)
+                static int our_event_count = 0;
+                if (xevent.xany.window == xwindow && our_event_count < 20) {
+                    fprintf(stderr, "grid-seq: X11 event type=%d for our window 0x%lx\n",
+                            xevent.type, xwindow);
+                    our_event_count++;
+                }
+
+                // Only process events for our window
+                if (xevent.xany.window != xwindow) {
+                    continue;
+                }
+
                 if (xevent.type == ButtonPress) {
-                    fprintf(stderr, "grid-seq: X11 ButtonPress detected at (%d, %d)\n",
-                            xevent.xbutton.x, xevent.xbutton.y);
+                    fprintf(stderr, "grid-seq: X11 ButtonPress detected at (%d, %d) button=%d\n",
+                            xevent.xbutton.x, xevent.xbutton.y, xevent.xbutton.button);
 
                     // Create a GdkEventButton and call our handler
                     GdkEventButton event;

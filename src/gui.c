@@ -171,14 +171,17 @@ static void on_settings_activate(GtkMenuItem* item, gpointer data) {
     gtk_widget_show_all(ui->settings_dialog);
 }
 
-// Mouse button press on drawing area
+// Mouse button press on event box
 static gboolean on_button_press(GtkWidget* widget, GdkEventButton* event, gpointer data) {
     GridSeqUI* ui = (GridSeqUI*)data;
-    (void)widget;
 
-    fprintf(stderr, "grid-seq: Button press event received at (%f, %f)\n", event->x, event->y);
+    fprintf(stderr, "grid-seq: Button press event received! widget=%p button=%d x=%f y=%f\n",
+            (void*)widget, event->button, event->x, event->y);
 
-    if (event->button != 1) return FALSE;  // Only left button
+    if (event->button != 1) {
+        fprintf(stderr, "  -> Ignoring non-left button\n");
+        return FALSE;  // Only left button
+    }
 
     int mx = (int)event->x;
     int my = (int)event->y;
@@ -452,25 +455,25 @@ static LV2UI_Handle instantiate(
     // For now, draw settings button with Cairo
     ui->menu_bar = NULL;
 
-    // Create drawing area for grid (full window since no menu)
+    // Create an event box to capture mouse events (drawing areas don't receive events when embedded)
+    GtkWidget* event_box = gtk_event_box_new();
+    gtk_box_pack_start(GTK_BOX(ui->vbox), event_box, TRUE, TRUE, 0);
+
+    // Create drawing area for grid inside the event box
     ui->drawing_area = gtk_drawing_area_new();
     gtk_widget_set_size_request(ui->drawing_area, WINDOW_WIDTH, WINDOW_HEIGHT);
-    gtk_box_pack_start(GTK_BOX(ui->vbox), ui->drawing_area, TRUE, TRUE, 0);
+    gtk_container_add(GTK_CONTAINER(event_box), ui->drawing_area);
 
-    // Enable button press events - add ALL_EVENTS_MASK to ensure events are captured
-    gtk_widget_add_events(ui->drawing_area, GDK_ALL_EVENTS_MASK);
+    // Enable button press events on the event box
+    gtk_widget_add_events(event_box, GDK_BUTTON_PRESS_MASK);
 
-    // Drawing area needs a GdkWindow to receive events - request it explicitly
-    gtk_widget_set_can_focus(ui->drawing_area, TRUE);
-    gtk_widget_set_has_window(ui->drawing_area, TRUE);
-
-    // Connect drawing area signals
+    // Connect drawing signal to drawing area (for rendering)
     fprintf(stderr, "grid-seq: connecting draw signal to drawing_area %p\n", (void*)ui->drawing_area);
     g_signal_connect(ui->drawing_area, "draw", G_CALLBACK(on_draw), ui);
-    g_signal_connect(ui->drawing_area, "button-press-event", G_CALLBACK(on_button_press), ui);
 
-    // Also try connecting to the window itself
-    g_signal_connect(ui->window, "button-press-event", G_CALLBACK(on_button_press), ui);
+    // Connect button-press to event box (for mouse clicks)
+    g_signal_connect(event_box, "button-press-event", G_CALLBACK(on_button_press), ui);
+    fprintf(stderr, "grid-seq: connected button-press-event to event_box\n");
 
     // Subscribe to ports
     if (ui->port_subscribe) {
@@ -502,6 +505,11 @@ static LV2UI_Handle instantiate(
     if (gdk_window) {
         Window xid = gdk_x11_window_get_xid(gdk_window);
         *widget = (LV2UI_Widget)(uintptr_t)xid;
+
+        // Enable X11 button press events directly
+        Display* display = GDK_WINDOW_XDISPLAY(gdk_window);
+        XSelectInput(display, xid, ButtonPressMask | ButtonReleaseMask);
+        fprintf(stderr, "grid-seq: Enabled X11 ButtonPress events on window 0x%lx\n", xid);
 
         // Check if window is actually visible
         GdkWindowState state = gdk_window_get_state(gdk_window);
@@ -604,6 +612,32 @@ static int idle(LV2UI_Handle handle) {
     // Process pending GTK events
     while (gtk_events_pending()) {
         gtk_main_iteration();
+    }
+
+    // Check for X11 events directly (since GTK events are blocked by embedding)
+    if (ui->window && gtk_widget_get_realized(ui->window)) {
+        GdkWindow* gdk_window = gtk_widget_get_window(ui->window);
+        if (gdk_window) {
+            Display* display = GDK_WINDOW_XDISPLAY(gdk_window);
+            Window xwindow = GDK_WINDOW_XID(gdk_window);
+            XEvent xevent;
+
+            while (XCheckWindowEvent(display, xwindow, ButtonPressMask, &xevent)) {
+                if (xevent.type == ButtonPress) {
+                    fprintf(stderr, "grid-seq: X11 ButtonPress detected at (%d, %d)\n",
+                            xevent.xbutton.x, xevent.xbutton.y);
+
+                    // Create a GdkEventButton and call our handler
+                    GdkEventButton event;
+                    event.type = GDK_BUTTON_PRESS;
+                    event.button = xevent.xbutton.button;
+                    event.x = xevent.xbutton.x;
+                    event.y = xevent.xbutton.y;
+
+                    on_button_press(ui->drawing_area, &event, ui);
+                }
+            }
+        }
     }
 
     // Redraw when state changes or at 30fps

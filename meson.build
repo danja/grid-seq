@@ -41,7 +41,7 @@ shared_library('grid_seq',
 shared_library('grid_seq_ui',
   ui_sources,
   include_directories: inc,
-  dependencies: [lv2_dep, cairo_dep, gtk3_dep],
+  dependencies: [lv2_dep, cairo_dep, gtk3_dep, x11_dep],
   name_prefix: '',
   install: true,
   install_dir: get_option('libdir') / 'lv2' / 'grid-seq.lv2'

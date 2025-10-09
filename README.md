@@ -50,9 +50,7 @@ Install to your user LV2 directory:
 
 ```bash
 # Copy plugin bundle to user directory
-cp build/grid_seq.so ~/.lv2/grid-seq.lv2/
-cp build/grid_seq_ui.so ~/.lv2/grid-seq.lv2/
-cp ttl/*.ttl ~/.lv2/grid-seq.lv2/
++
 ```
 
 ### System Installation

@@ -41,28 +41,11 @@ void sequencer_process_step(
     // Send Note On for current step
     uint8_t x = state->current_step;
 
-    // Count active notes in this step
-    int active_count = 0;
-    for (uint8_t y = 0; y < GRID_ROWS; y++) {
-        if (state->grid[x][y]) active_count++;
-    }
-
-    // Only log if there are active notes OR first few steps
-    static int step_count = 0;
-    if (active_count > 0 || step_count < 8) {
-        fprintf(stderr, "grid-seq: Step %d, active=%d, grid: ", x, active_count);
-        for (uint8_t y = 0; y < GRID_ROWS; y++) {
-            fprintf(stderr, "%d", state->grid[x][y] ? 1 : 0);
-        }
-        fprintf(stderr, "\n");
-        step_count++;
-    }
-
-    for (uint8_t y = 0; y < GRID_ROWS; y++) {
-        if (state->grid[x][y]) {
-            uint8_t note = state->base_note + y;
-            fprintf(stderr, "  -> SENDING NOTE ON: %d (base %d + offset %d) from grid[%d][%d]\n",
-                    note, state->base_note, y, x, y);
+    // Play all active notes across full MIDI range
+    for (uint8_t note = 0; note < GRID_PITCH_RANGE; note++) {
+        if (state->grid[x][note]) {
+            fprintf(stderr, "grid-seq: Step %d - SENDING NOTE ON: %d from grid[%d][%d]\n",
+                    x, note, x, note);
             s_send_midi_message(forge, uris, frame_offset, 0x90, note, 100);
             state->active_notes[note] = true;
         }

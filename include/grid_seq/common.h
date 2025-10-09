@@ -18,8 +18,9 @@
 
 #define MAX_GRID_SIZE 16
 #define GRID_SIZE 8  // Default size (for backward compatibility)
-#define GRID_ROWS 8  // Number of note rows (fixed)
-#define BASE_NOTE_C2 36
+#define GRID_PITCH_RANGE 128  // Full MIDI range (0-127)
+#define GRID_VISIBLE_ROWS 8   // Number of rows shown at once
+#define DEFAULT_PITCH_OFFSET 36  // C2 - default base note
 #define MIN_SEQUENCE_LENGTH 2
 #define MAX_SEQUENCE_LENGTH 16
 #define DEFAULT_SEQUENCE_LENGTH 8

@@ -242,12 +242,14 @@ static void connect_port(
 }
 
 static void update_grid_row_ports(GridSeq* gs) {
-    // Pack each row into a float (0-255)
+    // Pack current 8-note window (based on pitch_offset) into ports for UI display
     for (int x = 0; x < MAX_GRID_SIZE; x++) {
         if (gs->grid_row[x]) {
             uint8_t row_value = 0;
-            for (int y = 0; y < GRID_ROWS; y++) {
-                if (gs->state.grid[x][y]) {
+            for (int y = 0; y < GRID_VISIBLE_ROWS; y++) {
+                // Map visible row to actual MIDI note using pitch_offset
+                uint8_t actual_note = gs->state.pitch_offset + y;
+                if (gs->state.grid[x][actual_note]) {
                     row_value |= (1 << y);
                 }
             }
@@ -265,7 +267,7 @@ static void read_grid_row_ports(GridSeq* gs) {
             if (row_value != 0) {
                 fprintf(stderr, "  Column %d: value=%d (0x%02X)\n", x, row_value, row_value);
             }
-            for (int y = 0; y < GRID_ROWS; y++) {
+            for (int y = 0; y < GRID_VISIBLE_ROWS; y++) {
                 gs->state.grid[x][y] = (row_value & (1 << y)) != 0;
             }
         }
@@ -289,10 +291,10 @@ static void send_sysex_programmer_mode(GridSeq* gs, LV2_Atom_Forge* forge, bool 
 }
 
 static void send_launchpad_led(GridSeq* gs, LV2_Atom_Forge* forge, uint8_t note, uint8_t color) {
-    // LED commands on channel 16 (0x9F) to avoid triggering synths
-    // Launchpad accepts LED commands on any channel in Programmer Mode
-    // Musical notes use channel 1 (0x90) from sequencer
-    uint8_t msg[3] = {0x9F, note, color};
+    // LED commands use Note On channel 1 (0x90) in Programmer Mode
+    // Launchpad expects LED updates as Note On messages with velocity = color
+    // Musical notes go to midi_out, LED commands go to launchpad_out (separate ports)
+    uint8_t msg[3] = {0x90, note, color};
 
     lv2_atom_forge_frame_time(forge, 0);
     lv2_atom_forge_atom(forge, 3, gs->midi_MidiEvent);
@@ -312,10 +314,18 @@ static void update_launchpad_leds(GridSeq* gs, LV2_Atom_Forge* forge) {
     // Calculate which steps to show based on current hardware page
     uint8_t page_offset = gs->state.hardware_page * 8;
 
+    static int debug_count = 0;
+    if (debug_count < 3) {
+        fprintf(stderr, "grid-seq: LED update - pitch_offset=%d, hardware_page=%d\n",
+                gs->state.pitch_offset, gs->state.hardware_page);
+        debug_count++;
+    }
+
     for (uint8_t x = 0; x < 8; x++) {
         for (uint8_t y = 0; y < 8; y++) {
             uint8_t note = lp_grid_to_note(x, y);
             uint8_t actual_step = page_offset + x;
+            uint8_t actual_note = gs->state.pitch_offset + y;
             uint8_t color;
 
             // If this column is beyond sequence length, turn it off
@@ -324,14 +334,19 @@ static void update_launchpad_leds(GridSeq* gs, LV2_Atom_Forge* forge) {
             }
             // Check if this is the current playing step
             else if (actual_step == gs->state.current_step) {
-                color = gs->state.grid[actual_step][y] ? LP_COLOR_YELLOW : LP_COLOR_GREEN_DIM;
+                color = gs->state.grid[actual_step][actual_note] ? LP_COLOR_YELLOW : LP_COLOR_GREEN_DIM;
             }
             // Normal step coloring
             else {
-                color = gs->state.grid[actual_step][y] ? LP_COLOR_GREEN : LP_COLOR_OFF;
+                color = gs->state.grid[actual_step][actual_note] ? LP_COLOR_GREEN : LP_COLOR_OFF;
             }
 
             send_launchpad_led(gs, forge, note, color);
+
+            if (debug_count < 3 && color != LP_COLOR_OFF) {
+                fprintf(stderr, "  LED[%d,%d] note=%d color=%d (grid[%d][%d]=%d)\n",
+                        x, y, note, color, actual_step, actual_note, gs->state.grid[actual_step][actual_note]);
+            }
         }
     }
 
@@ -343,18 +358,22 @@ static void update_launchpad_leds(GridSeq* gs, LV2_Atom_Forge* forge) {
     // Right arrow (CC 94) - only lit if sequence length > 8 and we can go right
     uint8_t right_color = (gs->state.sequence_length > 8 && gs->state.hardware_page == 0) ? LP_COLOR_WHITE : LP_COLOR_OFF;
     send_launchpad_cc_led(gs, forge, 94, right_color);
+
+    // Up/Down pitch shift buttons (CC 91/92)
+    // CC 91 (down) - lit if we can shift down
+    uint8_t down_color = (gs->state.pitch_offset > 0) ? LP_COLOR_WHITE : LP_COLOR_OFF;
+    send_launchpad_cc_led(gs, forge, 91, down_color);
+
+    // CC 92 (up) - lit if we can shift up
+    uint8_t up_color = (gs->state.pitch_offset < (GRID_PITCH_RANGE - GRID_VISIBLE_ROWS)) ? LP_COLOR_WHITE : LP_COLOR_OFF;
+    send_launchpad_cc_led(gs, forge, 92, up_color);
 }
 
 static void activate(LV2_Handle instance) {
     GridSeq* gs = (GridSeq*)instance;
 
-    // TEMPORARY: Force clear all grid state to debug ascending scale
-    fprintf(stderr, "grid-seq: Clearing all grid state in activate()\n");
-    for (int x = 0; x < MAX_GRID_SIZE; x++) {
-        for (int y = 0; y < GRID_ROWS; y++) {
-            gs->state.grid[x][y] = false;
-        }
-    }
+    // Don't clear grid state on activate - preserve pattern across transport start/stop
+    // (Grid state is only cleared explicitly by user via Clear button)
 
     // Read any persisted grid state from ports (e.g., from host project file)
     // COMMENTED OUT to test if persisted data is the problem
@@ -429,6 +448,7 @@ static void run(LV2_Handle instance, uint32_t n_samples) {
                 uint8_t note = msg[1];
 
                 // Check if it's a grid button
+                fprintf(stderr, "grid-seq: Received Note On - note=%d, checking if grid button\n", note);
                 if (note >= 11 && note <= 88) {
                     uint8_t x, y;
                     lp_note_to_grid(note, &x, &y);
@@ -437,17 +457,18 @@ static void run(LV2_Handle instance, uint32_t n_samples) {
                             note, x, y);
 
                     if (x < 8 && y < 8) {
-                        // Calculate actual grid position based on hardware page
+                        // Calculate actual grid position based on hardware page and pitch offset
                         uint8_t actual_x = x + (gs->state.hardware_page * 8);
-                        if (actual_x < gs->state.sequence_length) {
-                            fprintf(stderr, "  -> Toggling grid[%d][%d], page=%d, new_value=%d\n",
-                                    actual_x, y, gs->state.hardware_page,
-                                    !gs->state.grid[actual_x][y]);
-                            state_toggle_step(&gs->state, actual_x, y);
+                        uint8_t actual_y = y + gs->state.pitch_offset;
+                        if (actual_x < gs->state.sequence_length && actual_y < GRID_PITCH_RANGE) {
+                            fprintf(stderr, "  -> Toggling grid[%d][%d], page=%d, pitch_offset=%d, new_value=%d\n",
+                                    actual_x, actual_y, gs->state.hardware_page, gs->state.pitch_offset,
+                                    !gs->state.grid[actual_x][actual_y]);
+                            state_toggle_step(&gs->state, actual_x, actual_y);
                             gs->grid_dirty = true;
                             gs->grid_change_counter++;
                             gs->last_toggled_x = actual_x;
-                            gs->last_toggled_y = y;
+                            gs->last_toggled_y = actual_y;
                         }
                     }
                 }
@@ -479,6 +500,26 @@ static void run(LV2_Handle instance, uint32_t n_samples) {
                             gs->state.hardware_page = 1;
                             gs->grid_dirty = true;
                             fprintf(stderr, "grid-seq: Right arrow - switched to page 1 (steps 8-15)\n");
+                        }
+                    }
+                    else if (cc == 91) {  // Shift pitch DOWN
+                        if (gs->state.pitch_offset > 0) {
+                            gs->state.pitch_offset--;
+                            gs->grid_dirty = true;
+                            fprintf(stderr, "grid-seq: Pitch shifted DOWN to %d (MIDI notes %d-%d)\n",
+                                    gs->state.pitch_offset,
+                                    gs->state.pitch_offset,
+                                    gs->state.pitch_offset + GRID_VISIBLE_ROWS - 1);
+                        }
+                    }
+                    else if (cc == 92) {  // Shift pitch UP
+                        if (gs->state.pitch_offset < (GRID_PITCH_RANGE - GRID_VISIBLE_ROWS)) {
+                            gs->state.pitch_offset++;
+                            gs->grid_dirty = true;
+                            fprintf(stderr, "grid-seq: Pitch shifted UP to %d (MIDI notes %d-%d)\n",
+                                    gs->state.pitch_offset,
+                                    gs->state.pitch_offset,
+                                    gs->state.pitch_offset + GRID_VISIBLE_ROWS - 1);
                         }
                     }
                     // Top row buttons could be used for other functions if needed
@@ -548,26 +589,65 @@ static void run(LV2_Handle instance, uint32_t n_samples) {
             return;
         }
 
-        // If values changed and are valid, toggle the grid cell
-        if ((x != gs->prev_grid_x || y != gs->prev_grid_y) &&
-            x >= 0 && x < MAX_GRID_SIZE && y >= 0 && y < GRID_ROWS) {
-            fprintf(stderr, "grid-seq: Plugin toggling cell [%d,%d], new value: %d\n",
-                    (int)x, (int)y, !gs->state.grid[(int)x][(int)y]);
-            state_toggle_step(&gs->state, (uint8_t)x, (uint8_t)y);
+        // Check for clear pattern signal (x == -300)
+        if (x == -300.0f && x != gs->prev_grid_x) {
+            fprintf(stderr, "\n=== CLEAR PATTERN REQUESTED ===\n");
 
-            // Dump grid state for this column
-            fprintf(stderr, "  Column %d state: ", (int)x);
-            for (int ny = 0; ny < GRID_ROWS; ny++) {
-                fprintf(stderr, "%d", gs->state.grid[(int)x][ny] ? 1 : 0);
+            // Clear all grid cells
+            for (int i = 0; i < MAX_GRID_SIZE; i++) {
+                for (int j = 0; j < GRID_PITCH_RANGE; j++) {
+                    gs->state.grid[i][j] = false;
+                }
             }
-            fprintf(stderr, " (bit 0=bottom note, bit 7=top note)\n");
 
-            gs->prev_grid_x = x;
-            gs->prev_grid_y = y;
+            // Force LED update
             gs->grid_dirty = true;
             gs->grid_change_counter++;
-            gs->last_toggled_x = (int8_t)x;
-            gs->last_toggled_y = (int8_t)y;
+
+            fprintf(stderr, "Pattern cleared. All grid cells set to false.\n");
+            fprintf(stderr, "================================\n\n");
+
+            gs->prev_grid_x = x;
+            return;
+        }
+
+        // Check for re-center signal (x == -400)
+        if (x == -400.0f && x != gs->prev_grid_x) {
+            fprintf(stderr, "\n=== RE-CENTER PITCH REQUESTED ===\n");
+
+            // Reset pitch offset to default (C2 = MIDI 36)
+            gs->state.pitch_offset = DEFAULT_PITCH_OFFSET;
+            gs->grid_dirty = true;
+
+            fprintf(stderr, "Pitch offset reset to %d (MIDI notes %d-%d)\n",
+                    DEFAULT_PITCH_OFFSET,
+                    DEFAULT_PITCH_OFFSET,
+                    DEFAULT_PITCH_OFFSET + GRID_VISIBLE_ROWS - 1);
+            fprintf(stderr, "================================\n\n");
+
+            gs->prev_grid_x = x;
+            return;
+        }
+
+        // If values changed and are valid, toggle the grid cell
+        // UI sends window-relative coordinates (0-7), we add pitch_offset to get absolute MIDI note
+        if ((x != gs->prev_grid_x || y != gs->prev_grid_y) &&
+            x >= 0 && x < MAX_GRID_SIZE && y >= 0 && y < GRID_VISIBLE_ROWS) {
+            uint8_t absolute_note = gs->state.pitch_offset + (uint8_t)y;
+            if (absolute_note < GRID_PITCH_RANGE) {
+                fprintf(stderr, "grid-seq: Plugin toggling cell [%d,%d] (window row %d + offset %d = MIDI note %d), new value: %d\n",
+                        (int)x, absolute_note, (int)y, gs->state.pitch_offset, absolute_note,
+                        !gs->state.grid[(int)x][absolute_note]);
+                state_toggle_step(&gs->state, (uint8_t)x, absolute_note);
+
+                gs->prev_grid_x = x;
+                gs->prev_grid_y = y;
+                gs->grid_dirty = true;
+                gs->grid_change_counter++;
+                fprintf(stderr, "grid-seq: Set grid_dirty=true after toggle\n");
+                gs->last_toggled_x = (int8_t)x;
+                gs->last_toggled_y = absolute_note;
+            }
         }
     }
 
@@ -661,6 +741,8 @@ static void run(LV2_Handle instance, uint32_t n_samples) {
 
     // Update Launchpad LEDs if grid changed or step changed
     if (gs->grid_dirty || gs->state.current_step != gs->prev_led_step) {
+        fprintf(stderr, "grid-seq: Calling update_launchpad_leds (grid_dirty=%d, step=%d)\n",
+                gs->grid_dirty, gs->state.current_step);
         update_launchpad_leds(gs, &gs->launchpad_forge);
         gs->grid_dirty = false;
         gs->prev_led_step = gs->state.current_step;

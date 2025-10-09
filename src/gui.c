@@ -241,13 +241,39 @@ static gboolean on_button_press(GtkWidget* widget, GdkEventButton* event, gpoint
         return TRUE;
     }
 
+    // Check if clear button was clicked (next to query)
+    int clear_x = query_x - button_size - 5;
+    int clear_y = 10;
+
+    if (mx >= clear_x && mx <= clear_x + button_size &&
+        my >= clear_y && my <= clear_y + button_size) {
+        // Clear button clicked - clear all grid cells
+        fprintf(stderr, "grid-seq: Clear button clicked!\n");
+
+        // Clear local state for immediate visual feedback
+        for (int i = 0; i < MAX_GRID_SIZE; i++) {
+            for (int j = 0; j < GRID_PITCH_RANGE; j++) {
+                ui->state.grid[i][j] = false;
+            }
+        }
+        ui->needs_redraw = true;
+
+        // Send a clear trigger to the plugin via a control port
+        // We'll use PORT_GRID_X with a special value (-300) to indicate clear
+        float clear_signal = -300.0f;
+        ui->write_function(ui->controller, 3, sizeof(float), 0, &clear_signal);
+
+        fprintf(stderr, "grid-seq: Sent clear signal to plugin\n");
+        return TRUE;
+    }
+
     // Calculate which grid cell was clicked
     int x = (mx - GRID_MARGIN) / (ui->cell_size + GRID_SPACING);
     int y = (my - GRID_MARGIN) / (ui->cell_size + GRID_SPACING);
 
-    if (x >= 0 && x < ui->state.sequence_length && y >= 0 && y < GRID_ROWS) {
-        // Flip Y coordinate (grid is drawn top to bottom)
-        int grid_y = GRID_ROWS - 1 - y;
+    if (x >= 0 && x < ui->state.sequence_length && y >= 0 && y < GRID_VISIBLE_ROWS) {
+        // Flip Y coordinate (grid is drawn top to bottom) and map to actual MIDI note
+        int grid_y = ui->state.pitch_offset + (GRID_VISIBLE_ROWS - 1 - y);
 
         // Toggle in local state for immediate visual feedback
         state_toggle_step(&ui->state, x, grid_y);
@@ -259,7 +285,7 @@ static gboolean on_button_press(GtkWidget* widget, GdkEventButton* event, gpoint
         ui->write_function(ui->controller, 3, sizeof(float), 0, &fx);  // PORT_GRID_X
         ui->write_function(ui->controller, 4, sizeof(float), 0, &fy);  // PORT_GRID_Y
 
-        fprintf(stderr, "grid-seq: GUI toggled cell [%d,%d]\n", x, grid_y);
+        fprintf(stderr, "grid-seq: GUI toggled cell [%d,%d] (MIDI note %d)\n", x, y, grid_y);
     }
 
     return TRUE;
@@ -296,17 +322,19 @@ static gboolean on_draw(GtkWidget* widget, cairo_t* cr, gpointer data) {
 
     // Calculate cell size to fit both dimensions
     int cell_width = (grid_width - (num_cols - 1) * GRID_SPACING) / num_cols;
-    int cell_height = (grid_height - (GRID_ROWS - 1) * GRID_SPACING) / GRID_ROWS;
+    int cell_height = (grid_height - (GRID_VISIBLE_ROWS - 1) * GRID_SPACING) / GRID_VISIBLE_ROWS;
     ui->cell_size = (cell_width < cell_height) ? cell_width : cell_height;
 
     // Draw grid cells - use sequence_length for columns
     for (int x = 0; x < num_cols; x++) {
-        for (int y = 0; y < GRID_ROWS; y++) {
+        for (int y = 0; y < GRID_VISIBLE_ROWS; y++) {
             int px = GRID_MARGIN + x * (ui->cell_size + GRID_SPACING);
             int py = GRID_MARGIN + y * (ui->cell_size + GRID_SPACING);
 
             // Check if this step is active (flip Y for bottom-to-top display)
-            bool is_active = ui->state.grid[x][GRID_ROWS - 1 - y];
+            // Map visible row to actual MIDI note using pitch_offset
+            uint8_t actual_note = ui->state.pitch_offset + (GRID_VISIBLE_ROWS - 1 - y);
+            bool is_active = ui->state.grid[x][actual_note];
 
             // Check if this is the current step
             bool is_current = (x == ui->state.current_step);
@@ -386,6 +414,35 @@ static gboolean on_draw(GtkWidget* widget, cairo_t* cr, gpointer data) {
     int query_center_y = query_y + button_size / 2;
     cairo_move_to(cr, query_center_x - 5, query_center_y + 6);
     cairo_show_text(cr, "?");
+
+    // Draw clear button (next to query)
+    int clear_x = query_x - button_size - 5;
+    int clear_y = 10;
+
+    // Clear button background (orange/yellow)
+    cairo_set_source_rgb(cr, 0.6, 0.4, 0.1);
+    cairo_rectangle(cr, clear_x, clear_y, button_size, button_size);
+    cairo_fill(cr);
+
+    // Draw "C" text on clear button
+    cairo_set_source_rgb(cr, 1.0, 0.8, 0.4);
+    cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_BOLD);
+    cairo_set_font_size(cr, 18);
+    int clear_center_x = clear_x + button_size / 2;
+    int clear_center_y = clear_y + button_size / 2;
+    cairo_move_to(cr, clear_center_x - 6, clear_center_y + 6);
+    cairo_show_text(cr, "C");
+
+    // Draw pitch range indicator in top-left
+    cairo_set_source_rgb(cr, 0.8, 0.8, 0.8);
+    cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
+    cairo_set_font_size(cr, 14);
+    char pitch_text[32];
+    snprintf(pitch_text, sizeof(pitch_text), "MIDI: %d-%d",
+             ui->state.pitch_offset,
+             ui->state.pitch_offset + GRID_VISIBLE_ROWS - 1);
+    cairo_move_to(cr, GRID_MARGIN, GRID_MARGIN - 5);
+    cairo_show_text(cr, pitch_text);
 
     return FALSE;
 }
@@ -622,7 +679,7 @@ static void port_event(
         uint8_t row_value = (uint8_t)(*(const float*)buffer);
 
         // Unpack bits into grid
-        for (int y = 0; y < GRID_ROWS; y++) {
+        for (int y = 0; y < GRID_VISIBLE_ROWS; y++) {
             ui->state.grid[x][y] = (row_value & (1 << y)) != 0;
         }
 

@@ -17,7 +17,7 @@ void state_init(GridSeqState* state, double sample_rate) {
     if (!state) return;
 
     memset(state, 0, sizeof(GridSeqState));
-    state->base_note = BASE_NOTE_C2;
+    state->pitch_offset = DEFAULT_PITCH_OFFSET;  // Start at C2 (MIDI note 36)
     state->beats_per_bar = 4.0;
     state->sample_rate = sample_rate;
     state->current_step = 0;
@@ -33,7 +33,7 @@ void state_init(GridSeqState* state, double sample_rate) {
 }
 
 void state_toggle_step(GridSeqState* state, uint8_t x, uint8_t y) {
-    if (!state || x >= MAX_GRID_SIZE || y >= GRID_ROWS) return;
+    if (!state || x >= MAX_GRID_SIZE || y >= GRID_PITCH_RANGE) return;
 
     state->grid[x][y] = !state->grid[x][y];
 }

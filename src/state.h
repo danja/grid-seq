@@ -16,8 +16,8 @@
 #include "grid_seq/common.h"
 
 typedef struct {
-    bool grid[MAX_GRID_SIZE][GRID_ROWS];
-    uint8_t base_note;
+    bool grid[MAX_GRID_SIZE][GRID_PITCH_RANGE];  // Full MIDI range 0-127
+    uint8_t pitch_offset;       // Base MIDI note for current 8-row view (0-120)
     uint8_t current_step;
     uint8_t previous_step;
     uint8_t sequence_length;    // 2-16 steps

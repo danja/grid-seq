@@ -81,17 +81,17 @@ static void draw_grid(GridSeqX11UI* ui) {
     int available_height = WINDOW_HEIGHT - 2 * GRID_MARGIN;
 
     int cell_width = (available_width - (visible_cols - 1) * GRID_SPACING) / visible_cols;
-    int cell_height = (available_height - (GRID_ROWS - 1) * GRID_SPACING) / GRID_ROWS;
+    int cell_height = (available_height - (GRID_VISIBLE_ROWS - 1) * GRID_SPACING) / GRID_VISIBLE_ROWS;
     ui->cell_size = (cell_width < cell_height) ? cell_width : cell_height;
 
     // Draw grid cells
     for (int x = 0; x < visible_cols; x++) {
-        for (int y = 0; y < GRID_ROWS; y++) {
+        for (int y = 0; y < GRID_VISIBLE_ROWS; y++) {
             int px = GRID_MARGIN + x * (ui->cell_size + GRID_SPACING);
             int py = GRID_MARGIN + y * (ui->cell_size + GRID_SPACING);
 
             // Flip Y coordinate for display
-            int grid_y = GRID_ROWS - 1 - y;
+            int grid_y = GRID_VISIBLE_ROWS - 1 - y;
             bool active = ui->state.grid[x][grid_y];
 
             // Highlight current step
@@ -114,19 +114,81 @@ static void draw_grid(GridSeqX11UI* ui) {
         }
     }
 
-    // Draw settings button (top-right)
+    // Draw buttons in vertical column on the right
     int button_size = 30;
-    int settings_x = WINDOW_WIDTH - button_size - 10;
-    int settings_y = 10;
+    int button_spacing = 5;
+    int buttons_x = WINDOW_WIDTH - button_size - 10;
+    int buttons_start_y = 10;
 
+    cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_BOLD);
+    cairo_set_font_size(cr, 18);
+
+    int current_y = buttons_start_y;
+
+    // Settings button (S)
     cairo_set_source_rgb(cr, 0.3, 0.3, 0.4);
-    cairo_rectangle(cr, settings_x, settings_y, button_size, button_size);
+    cairo_rectangle(cr, buttons_x, current_y, button_size, button_size);
     cairo_fill(cr);
-
     cairo_set_source_rgb(cr, 0.8, 0.8, 0.8);
+    cairo_move_to(cr, buttons_x + 10, current_y + 21);
+    cairo_show_text(cr, "S");
+    current_y += button_size + button_spacing;
+
+    // Reset button (R)
+    cairo_set_source_rgb(cr, 0.5, 0.2, 0.2);
+    cairo_rectangle(cr, buttons_x, current_y, button_size, button_size);
+    cairo_fill(cr);
+    cairo_set_source_rgb(cr, 1.0, 0.6, 0.6);
+    cairo_move_to(cr, buttons_x + 10, current_y + 21);
+    cairo_show_text(cr, "R");
+    current_y += button_size + button_spacing;
+
+    // Query button (?)
+    cairo_set_source_rgb(cr, 0.2, 0.2, 0.5);
+    cairo_rectangle(cr, buttons_x, current_y, button_size, button_size);
+    cairo_fill(cr);
+    cairo_set_source_rgb(cr, 0.6, 0.6, 1.0);
+    cairo_move_to(cr, buttons_x + 10, current_y + 21);
+    cairo_show_text(cr, "?");
+    current_y += button_size + button_spacing;
+
+    // Clear button (C)
+    cairo_set_source_rgb(cr, 0.6, 0.4, 0.1);
+    cairo_rectangle(cr, buttons_x, current_y, button_size, button_size);
+    cairo_fill(cr);
+    cairo_set_source_rgb(cr, 1.0, 0.8, 0.4);
+    cairo_move_to(cr, buttons_x + 10, current_y + 21);
+    cairo_show_text(cr, "C");
+    current_y += button_size + button_spacing;
+
+    // Re-center button (⌂)
+    cairo_set_source_rgb(cr, 0.2, 0.4, 0.2);
+    cairo_rectangle(cr, buttons_x, current_y, button_size, button_size);
+    cairo_fill(cr);
+    cairo_set_source_rgb(cr, 0.6, 1.0, 0.6);
     cairo_set_font_size(cr, 16);
-    cairo_move_to(cr, settings_x + 8, settings_y + 20);
-    cairo_show_text(cr, "⚙");
+    cairo_move_to(cr, buttons_x + 8, current_y + 21);
+    cairo_show_text(cr, "⌂");
+    current_y += button_size + button_spacing;
+
+    // Up button (pitch shift up)
+    cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_BOLD);
+    cairo_set_font_size(cr, 20);
+    cairo_set_source_rgb(cr, 0.3, 0.3, 0.5);
+    cairo_rectangle(cr, buttons_x, current_y, button_size, button_size);
+    cairo_fill(cr);
+    cairo_set_source_rgb(cr, 0.8, 0.8, 1.0);
+    cairo_move_to(cr, buttons_x + 8, current_y + 22);
+    cairo_show_text(cr, "▲");
+    current_y += button_size + button_spacing;
+
+    // Down button (pitch shift down)
+    cairo_set_source_rgb(cr, 0.3, 0.3, 0.5);
+    cairo_rectangle(cr, buttons_x, current_y, button_size, button_size);
+    cairo_fill(cr);
+    cairo_set_source_rgb(cr, 0.8, 0.8, 1.0);
+    cairo_move_to(cr, buttons_x + 8, current_y + 22);
+    cairo_show_text(cr, "▼");
 
     cairo_destroy(cr);
     ui->needs_redraw = false;
@@ -363,25 +425,95 @@ static void handle_settings_click(GridSeqX11UI* ui, int mx, int my) {
 static void handle_button_press(GridSeqX11UI* ui, int mx, int my) {
     fprintf(stderr, "grid-seq: X11 button press at (%d, %d)\n", mx, my);
 
-    // Check settings button
+    // Buttons are in vertical column on the right
     int button_size = 30;
-    int settings_x = WINDOW_WIDTH - button_size - 10;
-    int settings_y = 10;
+    int button_spacing = 5;
+    int buttons_x = WINDOW_WIDTH - button_size - 10;
+    int buttons_start_y = 10;
 
-    if (mx >= settings_x && mx <= settings_x + button_size &&
-        my >= settings_y && my <= settings_y + button_size) {
-        fprintf(stderr, "grid-seq: Settings button clicked\n");
-        open_settings_dialog(ui);
-        return;
+    // Check if click is in button column
+    if (mx >= buttons_x && mx <= buttons_x + button_size) {
+        int current_y = buttons_start_y;
+
+        // Settings button (S)
+        if (my >= current_y && my <= current_y + button_size) {
+            fprintf(stderr, "grid-seq: Settings button clicked\n");
+            open_settings_dialog(ui);
+            return;
+        }
+        current_y += button_size + button_spacing;
+
+        // Reset button (R)
+        if (my >= current_y && my <= current_y + button_size) {
+            fprintf(stderr, "grid-seq: Reset button clicked\n");
+            float reset_signal = -100.0f;
+            ui->write_function(ui->controller, 3, sizeof(float), 0, &reset_signal);
+            return;
+        }
+        current_y += button_size + button_spacing;
+
+        // Query button (?)
+        if (my >= current_y && my <= current_y + button_size) {
+            fprintf(stderr, "grid-seq: Query button clicked\n");
+            float query_signal = -200.0f;
+            ui->write_function(ui->controller, 3, sizeof(float), 0, &query_signal);
+            return;
+        }
+        current_y += button_size + button_spacing;
+
+        // Clear button (C)
+        if (my >= current_y && my <= current_y + button_size) {
+            fprintf(stderr, "grid-seq: Clear button clicked\n");
+
+            // Clear local state for immediate visual feedback
+            for (int i = 0; i < MAX_GRID_SIZE; i++) {
+                for (int j = 0; j < GRID_PITCH_RANGE; j++) {
+                    ui->state.grid[i][j] = false;
+                }
+            }
+            ui->needs_redraw = true;
+
+            float clear_signal = -300.0f;
+            ui->write_function(ui->controller, 3, sizeof(float), 0, &clear_signal);
+            return;
+        }
+        current_y += button_size + button_spacing;
+
+        // Re-center button (⌂)
+        if (my >= current_y && my <= current_y + button_size) {
+            fprintf(stderr, "grid-seq: Re-center button clicked\n");
+            float recenter_signal = -400.0f;
+            ui->write_function(ui->controller, 3, sizeof(float), 0, &recenter_signal);
+            return;
+        }
+        current_y += button_size + button_spacing;
+
+        // Up button (▲) - pitch shift up
+        if (my >= current_y && my <= current_y + button_size) {
+            fprintf(stderr, "grid-seq: Pitch up button clicked\n");
+            float up_signal = -500.0f;
+            ui->write_function(ui->controller, 3, sizeof(float), 0, &up_signal);
+            return;
+        }
+        current_y += button_size + button_spacing;
+
+        // Down button (▼) - pitch shift down
+        if (my >= current_y && my <= current_y + button_size) {
+            fprintf(stderr, "grid-seq: Pitch down button clicked\n");
+            float down_signal = -600.0f;
+            ui->write_function(ui->controller, 3, sizeof(float), 0, &down_signal);
+            return;
+        }
     }
 
-    // Calculate grid cell
+    // Calculate grid cell click
     int x = (mx - GRID_MARGIN) / (ui->cell_size + GRID_SPACING);
     int y = (my - GRID_MARGIN) / (ui->cell_size + GRID_SPACING);
 
-    if (x >= 0 && x < ui->state.sequence_length && y >= 0 && y < GRID_ROWS) {
-        // Flip Y coordinate
-        int grid_y = GRID_ROWS - 1 - y;
+    if (x >= 0 && x < ui->state.sequence_length && y >= 0 && y < GRID_VISIBLE_ROWS) {
+        // Flip Y coordinate - send window-relative row (0-7)
+        // Plugin will add pitch_offset to get absolute MIDI note
+        int grid_y = GRID_VISIBLE_ROWS - 1 - y;
 
         // Send to plugin - DON'T toggle locally, wait for port update from plugin
         float fx = (float)x;
@@ -389,7 +521,7 @@ static void handle_button_press(GridSeqX11UI* ui, int mx, int my) {
         ui->write_function(ui->controller, 3, sizeof(float), 0, &fx);  // PORT_GRID_X
         ui->write_function(ui->controller, 4, sizeof(float), 0, &fy);  // PORT_GRID_Y
 
-        fprintf(stderr, "grid-seq: Sent toggle request for cell [%d,%d]\n", x, grid_y);
+        fprintf(stderr, "grid-seq: Sent toggle request for cell [%d,%d] (window-relative row)\n", x, grid_y);
     }
 }
 
@@ -580,7 +712,7 @@ static void port_event(
         int x = port_index - 8;
         uint8_t row_value = (uint8_t)(*(const float*)buffer);
 
-        for (int y = 0; y < GRID_ROWS; y++) {
+        for (int y = 0; y < GRID_VISIBLE_ROWS; y++) {
             ui->state.grid[x][y] = (row_value & (1 << y)) != 0;
         }
 

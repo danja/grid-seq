@@ -18,6 +18,9 @@
 #include <lv2/core/lv2.h>
 #include <lv2/ui/ui.h>
 #include <lv2/urid/urid.h>
+#include <lv2/atom/atom.h>
+#include <lv2/atom/forge.h>
+#include <lv2/midi/midi.h>
 
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
@@ -64,6 +67,10 @@ typedef struct {
 
     LV2_URID_Map* map;
     const LV2UI_Port_Subscribe* port_subscribe;
+
+    // URIDs for atom forge
+    LV2_URID midi_MidiEvent;
+    LV2_Atom_Forge forge;
 } GridSeqX11UI;
 
 static void draw_grid(GridSeqX11UI* ui) {
@@ -161,34 +168,35 @@ static void draw_grid(GridSeqX11UI* ui) {
     cairo_show_text(cr, "C");
     current_y += button_size + button_spacing;
 
-    // Re-center button (⌂)
+    // Re-center button (H for Home)
     cairo_set_source_rgb(cr, 0.2, 0.4, 0.2);
     cairo_rectangle(cr, buttons_x, current_y, button_size, button_size);
     cairo_fill(cr);
     cairo_set_source_rgb(cr, 0.6, 1.0, 0.6);
-    cairo_set_font_size(cr, 16);
-    cairo_move_to(cr, buttons_x + 8, current_y + 21);
-    cairo_show_text(cr, "⌂");
-    current_y += button_size + button_spacing;
-
-    // Up button (pitch shift up)
     cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_BOLD);
-    cairo_set_font_size(cr, 20);
-    cairo_set_source_rgb(cr, 0.3, 0.3, 0.5);
-    cairo_rectangle(cr, buttons_x, current_y, button_size, button_size);
-    cairo_fill(cr);
-    cairo_set_source_rgb(cr, 0.8, 0.8, 1.0);
-    cairo_move_to(cr, buttons_x + 8, current_y + 22);
-    cairo_show_text(cr, "▲");
+    cairo_set_font_size(cr, 18);
+    cairo_move_to(cr, buttons_x + 9, current_y + 21);
+    cairo_show_text(cr, "H");
     current_y += button_size + button_spacing;
 
-    // Down button (pitch shift down)
+    // Up button (pitch shift up) - using + symbol
     cairo_set_source_rgb(cr, 0.3, 0.3, 0.5);
     cairo_rectangle(cr, buttons_x, current_y, button_size, button_size);
     cairo_fill(cr);
     cairo_set_source_rgb(cr, 0.8, 0.8, 1.0);
+    cairo_set_font_size(cr, 22);
     cairo_move_to(cr, buttons_x + 8, current_y + 22);
-    cairo_show_text(cr, "▼");
+    cairo_show_text(cr, "+");
+    current_y += button_size + button_spacing;
+
+    // Down button (pitch shift down) - using - symbol
+    cairo_set_source_rgb(cr, 0.3, 0.3, 0.5);
+    cairo_rectangle(cr, buttons_x, current_y, button_size, button_size);
+    cairo_fill(cr);
+    cairo_set_source_rgb(cr, 0.8, 0.8, 1.0);
+    cairo_set_font_size(cr, 22);
+    cairo_move_to(cr, buttons_x + 10, current_y + 20);
+    cairo_show_text(cr, "-");
 
     cairo_destroy(cr);
     ui->needs_redraw = false;
@@ -488,20 +496,58 @@ static void handle_button_press(GridSeqX11UI* ui, int mx, int my) {
         }
         current_y += button_size + button_spacing;
 
-        // Up button (▲) - pitch shift up
+        // Up button (+) - pitch shift up
+        // Send MIDI CC 92 message (same as Launchpad up button)
         if (my >= current_y && my <= current_y + button_size) {
-            fprintf(stderr, "grid-seq: Pitch up button clicked\n");
-            float up_signal = -500.0f;
-            ui->write_function(ui->controller, 3, sizeof(float), 0, &up_signal);
+            fprintf(stderr, "grid-seq: Pitch up button clicked - sending CC 92\n");
+
+            // Create a buffer for the atom sequence
+            uint8_t buf[128];
+            lv2_atom_forge_set_buffer(&ui->forge, buf, sizeof(buf));
+
+            // Forge the MIDI CC message
+            LV2_Atom_Forge_Frame frame;
+            lv2_atom_forge_sequence_head(&ui->forge, &frame, 0);
+            lv2_atom_forge_frame_time(&ui->forge, 0);
+
+            uint8_t midi_msg[3] = {0xB0, 92, 127};  // CC 92, value 127
+            lv2_atom_forge_atom(&ui->forge, 3, ui->midi_MidiEvent);
+            lv2_atom_forge_write(&ui->forge, midi_msg, 3);
+
+            lv2_atom_forge_pop(&ui->forge, &frame);
+
+            // Write to MIDI input port (port 0)
+            ui->write_function(ui->controller, 0, lv2_atom_total_size(&((LV2_Atom_Sequence*)buf)->atom),
+                             ui->map->map(ui->map->handle, LV2_ATOM__Sequence),
+                             buf);
             return;
         }
         current_y += button_size + button_spacing;
 
-        // Down button (▼) - pitch shift down
+        // Down button (-) - pitch shift down
+        // Send MIDI CC 91 message (same as Launchpad down button)
         if (my >= current_y && my <= current_y + button_size) {
-            fprintf(stderr, "grid-seq: Pitch down button clicked\n");
-            float down_signal = -600.0f;
-            ui->write_function(ui->controller, 3, sizeof(float), 0, &down_signal);
+            fprintf(stderr, "grid-seq: Pitch down button clicked - sending CC 91\n");
+
+            // Create a buffer for the atom sequence
+            uint8_t buf[128];
+            lv2_atom_forge_set_buffer(&ui->forge, buf, sizeof(buf));
+
+            // Forge the MIDI CC message
+            LV2_Atom_Forge_Frame frame;
+            lv2_atom_forge_sequence_head(&ui->forge, &frame, 0);
+            lv2_atom_forge_frame_time(&ui->forge, 0);
+
+            uint8_t midi_msg[3] = {0xB0, 91, 127};  // CC 91, value 127
+            lv2_atom_forge_atom(&ui->forge, 3, ui->midi_MidiEvent);
+            lv2_atom_forge_write(&ui->forge, midi_msg, 3);
+
+            lv2_atom_forge_pop(&ui->forge, &frame);
+
+            // Write to MIDI input port (port 0)
+            ui->write_function(ui->controller, 0, lv2_atom_total_size(&((LV2_Atom_Sequence*)buf)->atom),
+                             ui->map->map(ui->map->handle, LV2_ATOM__Sequence),
+                             buf);
             return;
         }
     }
@@ -560,6 +606,12 @@ static LV2UI_Handle instantiate(
         free(ui);
         return NULL;
     }
+
+    // Map URIDs for MIDI messages
+    ui->midi_MidiEvent = ui->map->map(ui->map->handle, LV2_MIDI__MidiEvent);
+
+    // Initialize atom forge
+    lv2_atom_forge_init(&ui->forge, ui->map);
 
     // Initialize state
     state_init(&ui->state, 48000.0);

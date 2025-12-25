@@ -64,9 +64,20 @@ meson compile -C build
 Install to your user LV2 directory:
 
 ```bash
-# Copy plugin binaries to user LV2 directory
+./scripts/install_user.sh
+lv2ls | grep grid-seq
+```
+
+Manual steps (same result):
+
+```bash
+# Create bundle directory
+mkdir -p ~/.lv2/grid-seq.lv2
+
+# Copy plugin binaries and metadata
 cp build/grid_seq.so ~/.lv2/grid-seq.lv2/
 cp build/grid_seq_ui.so ~/.lv2/grid-seq.lv2/
+cp ttl/manifest.ttl ttl/grid_seq.ttl ~/.lv2/grid-seq.lv2/
 
 # Verify installation
 lv2ls | grep grid-seq
